@@ -120,7 +120,7 @@ func (s *socketOperations) Read(ctx context.Context, _ *fs.File, dst usermem.IOS
 			}
 			return uint64(n), nil
 		}
-		return readv(s.fd, iovecsFromBlockSeq(dsts))
+		return readv(s.fd, safemem.IovecsFromBlockSeq(dsts))
 	}))
 	return int64(n), err
 }
@@ -143,7 +143,7 @@ func (s *socketOperations) Write(ctx context.Context, _ *fs.File, src usermem.IO
 			}
 			return uint64(n), nil
 		}
-		return writev(s.fd, iovecsFromBlockSeq(srcs))
+		return writev(s.fd, safemem.IovecsFromBlockSeq(srcs))
 	}))
 	return int64(n), err
 }
@@ -389,7 +389,7 @@ func (s *socketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 			return recvfrom(s.fd, dsts.Head().ToSlice(), sysflags, &senderAddrBuf)
 		}
 
-		iovs := iovecsFromBlockSeq(dsts)
+		iovs := safemem.IovecsFromBlockSeq(dsts)
 		msg := syscall.Msghdr{
 			Iov:    &iovs[0],
 			Iovlen: uint64(len(iovs)),
@@ -468,7 +468,7 @@ func (s *socketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 			return uint64(n), nil
 		}
 
-		iovs := iovecsFromBlockSeq(srcs)
+		iovs := safemem.IovecsFromBlockSeq(srcs)
 		msg := syscall.Msghdr{
 			Iov:    &iovs[0],
 			Iovlen: uint64(len(iovs)),
@@ -507,21 +507,6 @@ func (s *socketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 	}
 
 	return int(n), syserr.FromError(err)
-}
-
-func iovecsFromBlockSeq(bs safemem.BlockSeq) []syscall.Iovec {
-	iovs := make([]syscall.Iovec, 0, bs.NumBlocks())
-	for ; !bs.IsEmpty(); bs = bs.Tail() {
-		b := bs.Head()
-		iovs = append(iovs, syscall.Iovec{
-			Base: &b.ToSlice()[0],
-			Len:  uint64(b.Len()),
-		})
-		// We don't need to care about b.NeedSafecopy(), because the host
-		// kernel will handle such address ranges just fine (by returning
-		// EFAULT).
-	}
-	return iovs
 }
 
 func translateIOSyscallError(err error) error {

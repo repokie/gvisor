@@ -33,45 +33,64 @@ import (
 var DefaultDirentCacheSize uint64 = fs.DefaultDirentCacheSize
 
 // +stateify savable
+type localEndpoint struct {
+	dirent *fs.Dirent
+
+	endpoint transport.BoundEndpoint
+	inode    *fs.Inode
+}
+
+func (l *localEndpoint) inodeType() fs.InodeType {
+	if l.endpoint != nil {
+		return fs.Socket
+	}
+	if l.inode != nil {
+		return fs.Pipe
+	}
+	panic("endpoint or node must be set")
+}
+
+// +stateify savable
 type endpointMaps struct {
 	// mu protexts the direntMap, the keyMap, and the pathMap below.
 	mu sync.RWMutex `state:"nosave"`
 
+	// keyMap links MultiDeviceKeys (containing inode IDs) to their sockets.
+	// It is not stored during save because the inode ID may change upon restore.
+	keyMap map[device.MultiDeviceKey]*localEndpoint `state:"nosave"`
+
 	// direntMap links sockets to their dirents.
 	// It is filled concurrently with the keyMap and is stored upon save.
 	// Before saving, this map is used to populate the pathMap.
-	direntMap map[transport.BoundEndpoint]*fs.Dirent
-
-	// keyMap links MultiDeviceKeys (containing inode IDs) to their sockets.
-	// It is not stored during save because the inode ID may change upon restore.
-	keyMap map[device.MultiDeviceKey]transport.BoundEndpoint `state:"nosave"`
+	//direntMap map[*localEndpoint]*fs.Dirent
 
 	// pathMap links the sockets to their paths.
 	// It is filled before saving from the direntMap and is stored upon save.
 	// Upon restore, this map is used to re-populate the keyMap.
-	pathMap map[transport.BoundEndpoint]string
+	pathMap map[*localEndpoint]string
 }
 
 // add adds the endpoint to the maps.
 // A reference is taken on the dirent argument.
 //
 // Precondition: maps must have been locked with 'lock'.
-func (e *endpointMaps) add(key device.MultiDeviceKey, d *fs.Dirent, ep transport.BoundEndpoint) {
-	e.keyMap[key] = ep
+func (e *endpointMaps) addBoundEndpoint(key device.MultiDeviceKey, d *fs.Dirent, ep transport.BoundEndpoint) {
 	d.IncRef()
-	e.direntMap[ep] = d
+	e.keyMap[key] = &localEndpoint{dirent: d, endpoint: ep}
+}
+
+func (e *endpointMaps) addPipe(key device.MultiDeviceKey, d *fs.Dirent, inode *fs.Inode) {
+	d.IncRef()
+	e.keyMap[key] = &localEndpoint{dirent: d, inode: inode}
 }
 
 // remove deletes the key from the maps.
 //
 // Precondition: maps must have been locked with 'lock'.
 func (e *endpointMaps) remove(key device.MultiDeviceKey) {
-	endpoint := e.get(key)
+	endpoint := e.keyMap[key]
 	delete(e.keyMap, key)
-
-	d := e.direntMap[endpoint]
-	d.DecRef()
-	delete(e.direntMap, endpoint)
+	endpoint.dirent.DecRef()
 }
 
 // lock blocks other addition and removal operations from happening while
@@ -82,11 +101,31 @@ func (e *endpointMaps) lock() func() {
 	return func() { e.mu.Unlock() }
 }
 
-// get returns the endpoint mapped to the given key.
+// getBoundEndpoint returns the bound endpoint mapped to the given key.
 //
 // Precondition: maps must have been locked for reading.
-func (e *endpointMaps) get(key device.MultiDeviceKey) transport.BoundEndpoint {
-	return e.keyMap[key]
+func (e *endpointMaps) getBoundEndpoint(key device.MultiDeviceKey) transport.BoundEndpoint {
+	if v := e.keyMap[key]; v != nil {
+		return v.endpoint
+	}
+	return nil
+}
+
+// getBoundEndpoint returns the pipe inode mapped to the given key.
+//
+// Precondition: maps must have been locked for reading.
+func (e *endpointMaps) getPipe(key device.MultiDeviceKey) *fs.Inode {
+	if v := e.keyMap[key]; v != nil {
+		return v.inode
+	}
+	return nil
+}
+
+func (e *endpointMaps) getType(key device.MultiDeviceKey) (fs.InodeType, bool) {
+	if v := e.keyMap[key]; v != nil {
+		return v.inodeType(), true
+	}
+	return 0, false
 }
 
 // session holds state for each 9p session established during sys_mount.
@@ -201,6 +240,7 @@ func newInodeOperations(ctx context.Context, s *session, file contextFile, qid p
 		BlockSize: bsize(attr),
 	}
 
+	// TODO(fvoznika): Add code for pipe
 	if s.endpoints != nil {
 		if socket {
 			sattr.Type = fs.Socket
@@ -208,8 +248,8 @@ func newInodeOperations(ctx context.Context, s *session, file contextFile, qid p
 			// If unix sockets are allowed on this filesystem, check if this file is
 			// supposed to be a socket file.
 			unlock := s.endpoints.lock()
-			if s.endpoints.get(deviceKey) != nil {
-				sattr.Type = fs.Socket
+			if t, ok := s.endpoints.getType(deviceKey); ok {
+				sattr.Type = t
 			}
 			unlock()
 		}
@@ -312,9 +352,8 @@ func Root(ctx context.Context, dev string, filesystem fs.Filesystem, superBlockF
 // newEndpointMaps creates a new endpointMaps.
 func newEndpointMaps() *endpointMaps {
 	return &endpointMaps{
-		direntMap: make(map[transport.BoundEndpoint]*fs.Dirent),
-		keyMap:    make(map[device.MultiDeviceKey]transport.BoundEndpoint),
-		pathMap:   make(map[transport.BoundEndpoint]string),
+		keyMap:  make(map[device.MultiDeviceKey]*localEndpoint),
+		pathMap: make(map[*localEndpoint]string),
 	}
 }
 
@@ -352,14 +391,14 @@ func (s *session) fillPathMap() error {
 	unlock := s.endpoints.lock()
 	defer unlock()
 
-	for ep, dir := range s.endpoints.direntMap {
-		mountRoot := dir.MountRoot()
+	for _, endpoint := range s.endpoints.keyMap {
+		mountRoot := endpoint.dirent.MountRoot()
 		defer mountRoot.DecRef()
-		dirPath, _ := dir.FullName(mountRoot)
+		dirPath, _ := endpoint.dirent.FullName(mountRoot)
 		if dirPath == "" {
 			return fmt.Errorf("error getting path from dirent")
 		}
-		s.endpoints.pathMap[ep] = dirPath
+		s.endpoints.pathMap[endpoint] = dirPath
 	}
 	return nil
 }
@@ -368,7 +407,7 @@ func (s *session) fillPathMap() error {
 func (s *session) restoreEndpointMaps(ctx context.Context) error {
 	// When restoring, only need to create the keyMap because the dirent and path
 	// maps got stored through the save.
-	s.endpoints.keyMap = make(map[device.MultiDeviceKey]transport.BoundEndpoint)
+	s.endpoints.keyMap = make(map[device.MultiDeviceKey]*localEndpoint)
 	if err := s.fillKeyMap(ctx); err != nil {
 		return fmt.Errorf("failed to insert sockets into endpoint map: %v", err)
 	}
@@ -376,6 +415,6 @@ func (s *session) restoreEndpointMaps(ctx context.Context) error {
 	// Re-create pathMap because it can no longer be trusted as socket paths can
 	// change while process continues to run. Empty pathMap will be re-filled upon
 	// next save.
-	s.endpoints.pathMap = make(map[transport.BoundEndpoint]string)
+	s.endpoints.pathMap = make(map[*localEndpoint]string)
 	return nil
 }

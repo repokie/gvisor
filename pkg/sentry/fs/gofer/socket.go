@@ -35,7 +35,7 @@ func (i *inodeOperations) BoundEndpoint(inode *fs.Inode, path string) transport.
 	if i.session().endpoints != nil {
 		unlock := i.session().endpoints.lock()
 		defer unlock()
-		ep := i.session().endpoints.get(i.fileState.key)
+		ep := i.session().endpoints.getBoundEndpoint(i.fileState.key)
 		if ep != nil {
 			return ep
 		}

@@ -23,7 +23,9 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/device"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/pipe"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
+	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
@@ -67,6 +69,21 @@ func (i *inodeOperations) Lookup(ctx context.Context, dir *fs.Inode, name string
 			return nil, syserror.ENOENT
 		}
 		return nil, err
+	}
+
+	if i.session().endpoints != nil {
+		deviceKey := device.MultiDeviceKey{
+			Device:          p9attr.RDev,
+			SecondaryDevice: i.session().connID,
+			Inode:           qids[0].Path,
+		}
+		unlock := i.session().endpoints.lock()
+		if pipeInode := i.session().endpoints.getPipe(deviceKey); pipeInode != nil {
+			unlock()
+			pipeInode.IncRef()
+			return fs.NewDirent(ctx, pipeInode, name), nil
+		}
+		unlock()
 	}
 
 	// Construct the Inode operations.
@@ -258,12 +275,6 @@ func (i *inodeOperations) Bind(ctx context.Context, dir *fs.Inode, name string, 
 		return nil, err
 	}
 
-	key := device.MultiDeviceKey{
-		Device:          attr.RDev,
-		SecondaryDevice: i.session().connID,
-		Inode:           qid.Path,
-	}
-
 	// Create child dirent.
 
 	// Get an unopened p9.File for the file we created so that it can be
@@ -279,7 +290,7 @@ func (i *inodeOperations) Bind(ctx context.Context, dir *fs.Inode, name string, 
 
 	// Construct the positive Dirent.
 	childDir := fs.NewDirent(ctx, fs.NewInode(ctx, iops, dir.MountSource, sattr), name)
-	i.session().endpoints.add(key, childDir, ep)
+	i.session().endpoints.addBoundEndpoint(iops.fileState.key, childDir, ep)
 	return childDir, nil
 }
 
@@ -294,10 +305,83 @@ func (i *inodeOperations) CreateFifo(ctx context.Context, dir *fs.Inode, name st
 
 	// N.B. FIFOs use major/minor numbers 0.
 	if _, err := i.fileState.file.mknod(ctx, name, mode, 0, 0, p9.UID(owner.UID), p9.GID(owner.GID)); err != nil {
-		return err
+		if i.session().endpoints == nil || err != syscall.EPERM {
+			return err
+		}
+		return i.createInternalFifo(ctx, dir, name, owner, perm)
 	}
 
 	i.touchModificationAndStatusChangeTime(ctx, dir)
+	return nil
+}
+
+func (i *inodeOperations) createInternalFifo(ctx context.Context, dir *fs.Inode, name string, owner fs.FileOwner, perm fs.FilePermissions) error {
+	if i.session().endpoints == nil {
+		return syserror.EPERM
+	}
+
+	// TODO(fvoznika): Refactor with Bind()
+
+	// Create replaces the directory fid with the newly created/opened
+	// file, so clone this directory so it doesn't change out from under
+	// this node.
+	_, dirClone, err := i.fileState.file.walk(ctx, nil)
+	if err != nil {
+		return err
+	}
+	// TODO(fvoznika): Why not 'defer dirClone.close()'?
+
+	// Stabilize the endpoint map while creation is in progress.
+	unlock := i.session().endpoints.lock()
+	defer unlock()
+
+	// Create a regular file in the gofer and then mark it as a socket by
+	// adding this inode key in the 'endpoints' map.
+	hostFile, err := dirClone.create(ctx, name, p9.ReadWrite, p9.FileMode(perm.LinuxMode()), p9.UID(owner.UID), p9.GID(owner.GID))
+	if err != nil {
+		return err
+	}
+	// We're not going to use this file.
+	hostFile.Close()
+
+	i.touchModificationAndStatusChangeTime(ctx, dir)
+
+	// Get the attributes of the file to create inode key.
+	qid, mask, attr, err := getattr(ctx, dirClone)
+	if err != nil {
+		dirClone.close(ctx)
+		return err
+	}
+
+	// Create child dirent.
+
+	// Get an unopened p9.File for the file we created so that it can be
+	// cloned and re-opened multiple times after creation.
+	_, unopened, err := i.fileState.file.walk(ctx, []string{name})
+	if err != nil {
+		dirClone.close(ctx)
+		return err
+	}
+
+	// Construct the InodeOperations.
+	sattr, fileOps := newInodeOperations(ctx, i.fileState.s, unopened, qid, mask, attr, true)
+
+	// TODO(fvoznika): Move inside newInodeOperations
+	sattr.Type = fs.Pipe
+
+	// First create a pipe.
+	p := pipe.NewPipe(true /* isNamed */, pipe.DefaultPipeSize, usermem.PageSize)
+
+	// Wrap the iops with our Fifo.
+	iops := &fifo{
+		InodeOperations: pipe.NewInodeOperations(ctx, perm, p),
+		fileIops:        fileOps,
+	}
+	inode := fs.NewInode(ctx, iops, dir.MountSource, sattr)
+
+	// Construct the positive Dirent.
+	childDir := fs.NewDirent(ctx, fs.NewInode(ctx, iops, dir.MountSource, sattr), name)
+	i.session().endpoints.addPipe(fileOps.fileState.key, childDir, inode)
 	return nil
 }
 

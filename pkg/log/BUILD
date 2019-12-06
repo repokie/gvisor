@@ -7,7 +7,6 @@ go_library(
     name = "log",
     srcs = [
         "glog.go",
-        "glog_unsafe.go",
         "json.go",
         "json_k8s.go",
         "log.go",

@@ -15,251 +15,204 @@
 package proc
 
 import (
-	"bytes"
-	"fmt"
-
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/kernfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/limits"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
-	"gvisor.dev/gvisor/pkg/sentry/usage"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+	"gvisor.dev/gvisor/pkg/syserror"
 )
 
-// mapsCommon is embedded by mapsData and smapsData.
-type mapsCommon struct {
-	t *kernel.Task
-}
-
-// mm gets the kernel task's MemoryManager. No additional reference is taken on
-// mm here. This is safe because MemoryManager.destroy is required to leave the
-// MemoryManager in a state where it's still usable as a DynamicBytesSource.
-func (md *mapsCommon) mm() *mm.MemoryManager {
-	var tmm *mm.MemoryManager
-	md.t.WithMuLocked(func(t *kernel.Task) {
-		if mm := t.MemoryManager(); mm != nil {
-			tmm = mm
-		}
-	})
-	return tmm
-}
-
-// mapsData implements vfs.DynamicBytesSource for /proc/[pid]/maps.
+// taskInode represents the inode for /proc/PID/ directory.
 //
 // +stateify savable
-type mapsData struct {
-	mapsCommon
+type taskInode struct {
+	kernfs.InodeNotSymlink
+	kernfs.InodeDirectoryNoNewChildren
+	kernfs.InodeNoDynamicLookup
+	kernfs.InodeAttrs
+	kernfs.OrderedChildren
+
+	task *kernel.Task
 }
 
-var _ vfs.DynamicBytesSource = (*mapsData)(nil)
+var _ kernfs.Inode = (*taskInode)(nil)
 
-// Generate implements vfs.DynamicBytesSource.Generate.
-func (md *mapsData) Generate(ctx context.Context, buf *bytes.Buffer) error {
-	if mm := md.mm(); mm != nil {
-		mm.ReadMapsDataInto(ctx, buf)
+func newTaskInode(inoGen InoGenerator, task *kernel.Task, pidns *kernel.PIDNamespace, isThreadGroup bool, cgroupControllers map[string]string) *kernfs.Dentry {
+	contents := map[string]*kernfs.Dentry{
+		"auxv":    newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &auxvData{task: task}),
+		"cmdline": newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &cmdlineData{task: task, arg: cmdlineDataArg}),
+		"comm":    newComm(task, inoGen.NextIno(), filePerm),
+		"environ": newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &cmdlineData{task: task, arg: environDataArg}),
+		//"exe":       newExe(t, msrc),
+		//"fd":        newFdDir(t, msrc),
+		//"fdinfo":    newFdInfoDir(t, msrc),
+		"gid_map": newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &idMapData{task: task, gids: true}),
+		"io":      newTaskOwnedFile(task, inoGen.NextIno(), filePerm, newIO(task, isThreadGroup)),
+		"maps":    newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &mapsData{mapsCommon{task: task}}),
+		//"mountinfo": seqfile.NewSeqFileInode(t, &mountInfoFile{t: t}, msrc),
+		//"mounts":    seqfile.NewSeqFileInode(t, &mountsFile{t: t}, msrc),
+		"ns": newTaskOwnedDir(task, inoGen.NextIno(), 0511, map[string]*kernfs.Dentry{
+			"net":  newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &namespaceData{ns: "net", ino: inoGen.NextIno()}),
+			"pid":  newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &namespaceData{ns: "pid", ino: inoGen.NextIno()}),
+			"user": newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &namespaceData{ns: "user", ino: inoGen.NextIno()}),
+		}),
+		"smaps":   newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &smapsData{mapsCommon{task: task}}),
+		"stat":    newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &taskStatData{task: task, pidns: pidns, tgstats: isThreadGroup}),
+		"statm":   newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &statmData{task: task}),
+		"status":  newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &statusData{task: task, pidns: pidns}),
+		"uid_map": newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &idMapData{task: task, gids: false}),
+	}
+	if isThreadGroup {
+		dentry := newSubtasks(task, pidns, inoGen, cgroupControllers)
+		contents["task"] = dentry
+	}
+	if len(cgroupControllers) > 0 {
+		contents["cgroup"] = newTaskOwnedFile(task, inoGen.NextIno(), filePerm, &cgroupData{controllers: cgroupControllers})
+	}
+
+	taskInode := &taskInode{task: task}
+	// Note: credentials are overridden by taskOwnedInode.
+	taskInode.InodeAttrs.Init(task.Credentials(), inoGen.NextIno(), linux.ModeDirectory|dirPerm)
+
+	inode := &taskOwnedInode{Inode: taskInode, owner: task}
+	dentry := &kernfs.Dentry{}
+	dentry.Init(inode)
+
+	taskInode.OrderedChildren.Init(kernfs.OrderedChildrenOptions{})
+	links := taskInode.OrderedChildren.Populate(dentry, contents)
+	taskInode.IncLinks(links)
+
+	return dentry
+}
+
+// Valid implements kernfs.inodeDynamicLookup. This inode remains valid as long
+// as the task is still running. When it's dead, another tasks with the same
+// PID could replace it.
+func (i *taskInode) Valid(ctx context.Context) bool {
+	return i.task.ExitState() != kernel.TaskExitDead
+}
+
+// Open implements kernfs.Inode.
+func (i *taskInode) Open(rp *vfs.ResolvingPath, vfsd *vfs.Dentry, flags uint32) (*vfs.FileDescription, error) {
+	fd := &kernfs.GenericDirectoryFD{}
+	fd.Init(rp.Mount(), vfsd, &i.OrderedChildren, flags)
+	return fd.VFSFileDescription(), nil
+}
+
+// SetStat implements kernfs.Inode.
+func (i *taskInode) SetStat(_ *vfs.Filesystem, opts vfs.SetStatOptions) error {
+	stat := opts.Stat
+	if stat.Mask&linux.STATX_MODE != 0 {
+		return syserror.EPERM
 	}
 	return nil
 }
 
-// smapsData implements vfs.DynamicBytesSource for /proc/[pid]/smaps.
-//
-// +stateify savable
-type smapsData struct {
-	mapsCommon
+// taskOwnedInode implements kernfs.Inode and overrides inode owner with task
+// effective user and group.
+type taskOwnedInode struct {
+	kernfs.Inode
+
+	// owner is the task that owns this inode.
+	owner *kernel.Task
 }
 
-var _ vfs.DynamicBytesSource = (*smapsData)(nil)
+var _ kernfs.Inode = (*taskOwnedInode)(nil)
 
-// Generate implements vfs.DynamicBytesSource.Generate.
-func (sd *smapsData) Generate(ctx context.Context, buf *bytes.Buffer) error {
-	if mm := sd.mm(); mm != nil {
-		mm.ReadSmapsDataInto(ctx, buf)
-	}
-	return nil
+func newTaskOwnedFile(task *kernel.Task, ino uint64, perm linux.FileMode, data vfs.DynamicBytesSource) *kernfs.Dentry {
+	dynFile := &kernfs.DynamicBytesFile{}
+
+	// Note: credentials are overridden by taskOwnedInode.
+	dynFile.Init(task.Credentials(), ino, data, perm)
+
+	inode := &taskOwnedInode{Inode: dynFile, owner: task}
+	d := &kernfs.Dentry{}
+	d.Init(inode)
+	return d
 }
 
-// +stateify savable
-type taskStatData struct {
-	t *kernel.Task
+func newTaskOwnedDir(task *kernel.Task, ino uint64, perm linux.FileMode, children map[string]*kernfs.Dentry) *kernfs.Dentry {
+	dir := &kernfs.StaticDirectory{}
 
-	// If tgstats is true, accumulate fault stats (not implemented) and CPU
-	// time across all tasks in t's thread group.
-	tgstats bool
+	// Note: credentials are overridden by taskOwnedInode.
+	dir.Init(task.Credentials(), ino, perm)
 
-	// pidns is the PID namespace associated with the proc filesystem that
-	// includes the file using this statData.
-	pidns *kernel.PIDNamespace
+	inode := &taskOwnedInode{Inode: dir, owner: task}
+	d := &kernfs.Dentry{}
+	d.Init(inode)
+
+	dir.OrderedChildren.Init(kernfs.OrderedChildrenOptions{})
+	links := dir.OrderedChildren.Populate(d, children)
+	dir.IncLinks(links)
+
+	return d
 }
 
-var _ vfs.DynamicBytesSource = (*taskStatData)(nil)
+// Stat implements kernfs.Inode.
+func (i *taskOwnedInode) Stat(fs *vfs.Filesystem) linux.Statx {
+	stat := i.Inode.Stat(fs)
+	uid, gid := i.getOwner(linux.FileMode(stat.Mode))
+	stat.UID = uint32(uid)
+	stat.GID = uint32(gid)
+	return stat
+}
 
-// Generate implements vfs.DynamicBytesSource.Generate.
-func (s *taskStatData) Generate(ctx context.Context, buf *bytes.Buffer) error {
-	fmt.Fprintf(buf, "%d ", s.pidns.IDOfTask(s.t))
-	fmt.Fprintf(buf, "(%s) ", s.t.Name())
-	fmt.Fprintf(buf, "%c ", s.t.StateStatus()[0])
-	ppid := kernel.ThreadID(0)
-	if parent := s.t.Parent(); parent != nil {
-		ppid = s.pidns.IDOfThreadGroup(parent.ThreadGroup())
+// CheckPermissions implements kernfs.Inode.
+func (i *taskOwnedInode) CheckPermissions(_ context.Context, creds *auth.Credentials, ats vfs.AccessTypes) error {
+	mode := i.Mode()
+	uid, gid := i.getOwner(mode)
+	return vfs.GenericCheckPermissions(
+		creds,
+		ats,
+		mode.FileType() == linux.ModeDirectory,
+		uint16(mode),
+		uid,
+		gid,
+	)
+}
+
+func (i *taskOwnedInode) getOwner(mode linux.FileMode) (auth.KUID, auth.KGID) {
+	// By default, set the task owner as the file owner.
+	creds := i.owner.Credentials()
+	uid := creds.EffectiveKUID
+	gid := creds.EffectiveKGID
+
+	// Linux doesn't apply dumpability adjustments to world readable/executable
+	// directories so that applications can stat /proc/PID to determine the
+	// effective UID of a process. See fs/proc/base.c:task_dump_owner.
+	if mode.FileType() == linux.ModeDirectory && mode.Permissions() == 0555 {
+		return uid, gid
 	}
-	fmt.Fprintf(buf, "%d ", ppid)
-	fmt.Fprintf(buf, "%d ", s.pidns.IDOfProcessGroup(s.t.ThreadGroup().ProcessGroup()))
-	fmt.Fprintf(buf, "%d ", s.pidns.IDOfSession(s.t.ThreadGroup().Session()))
-	fmt.Fprintf(buf, "0 0 " /* tty_nr tpgid */)
-	fmt.Fprintf(buf, "0 " /* flags */)
-	fmt.Fprintf(buf, "0 0 0 0 " /* minflt cminflt majflt cmajflt */)
-	var cputime usage.CPUStats
-	if s.tgstats {
-		cputime = s.t.ThreadGroup().CPUStats()
-	} else {
-		cputime = s.t.CPUStats()
-	}
-	fmt.Fprintf(buf, "%d %d ", linux.ClockTFromDuration(cputime.UserTime), linux.ClockTFromDuration(cputime.SysTime))
-	cputime = s.t.ThreadGroup().JoinedChildCPUStats()
-	fmt.Fprintf(buf, "%d %d ", linux.ClockTFromDuration(cputime.UserTime), linux.ClockTFromDuration(cputime.SysTime))
-	fmt.Fprintf(buf, "%d %d ", s.t.Priority(), s.t.Niceness())
-	fmt.Fprintf(buf, "%d ", s.t.ThreadGroup().Count())
 
-	// itrealvalue. Since kernel 2.6.17, this field is no longer
-	// maintained, and is hard coded as 0.
-	fmt.Fprintf(buf, "0 ")
-
-	// Start time is relative to boot time, expressed in clock ticks.
-	fmt.Fprintf(buf, "%d ", linux.ClockTFromDuration(s.t.StartTime().Sub(s.t.Kernel().Timekeeper().BootTime())))
-
-	var vss, rss uint64
-	s.t.WithMuLocked(func(t *kernel.Task) {
-		if mm := t.MemoryManager(); mm != nil {
-			vss = mm.VirtualMemorySize()
-			rss = mm.ResidentSetSize()
-		}
+	// If the task is not dumpable, then root (in the namespace preferred)
+	// owns the file.
+	var m *mm.MemoryManager
+	i.owner.WithMuLocked(func(t *kernel.Task) {
+		m = t.MemoryManager()
 	})
-	fmt.Fprintf(buf, "%d %d ", vss, rss/usermem.PageSize)
 
-	// rsslim.
-	fmt.Fprintf(buf, "%d ", s.t.ThreadGroup().Limits().Get(limits.Rss).Cur)
-
-	fmt.Fprintf(buf, "0 0 0 0 0 " /* startcode endcode startstack kstkesp kstkeip */)
-	fmt.Fprintf(buf, "0 0 0 0 0 " /* signal blocked sigignore sigcatch wchan */)
-	fmt.Fprintf(buf, "0 0 " /* nswap cnswap */)
-	terminationSignal := linux.Signal(0)
-	if s.t == s.t.ThreadGroup().Leader() {
-		terminationSignal = s.t.ThreadGroup().TerminationSignal()
+	if m == nil {
+		return auth.RootKUID, auth.RootKGID
 	}
-	fmt.Fprintf(buf, "%d ", terminationSignal)
-	fmt.Fprintf(buf, "0 0 0 " /* processor rt_priority policy */)
-	fmt.Fprintf(buf, "0 0 0 " /* delayacct_blkio_ticks guest_time cguest_time */)
-	fmt.Fprintf(buf, "0 0 0 0 0 0 0 " /* start_data end_data start_brk arg_start arg_end env_start env_end */)
-	fmt.Fprintf(buf, "0\n" /* exit_code */)
-
-	return nil
-}
-
-// statmData implements vfs.DynamicBytesSource for /proc/[pid]/statm.
-//
-// +stateify savable
-type statmData struct {
-	t *kernel.Task
-}
-
-var _ vfs.DynamicBytesSource = (*statmData)(nil)
-
-// Generate implements vfs.DynamicBytesSource.Generate.
-func (s *statmData) Generate(ctx context.Context, buf *bytes.Buffer) error {
-	var vss, rss uint64
-	s.t.WithMuLocked(func(t *kernel.Task) {
-		if mm := t.MemoryManager(); mm != nil {
-			vss = mm.VirtualMemorySize()
-			rss = mm.ResidentSetSize()
+	if m.Dumpability() != mm.UserDumpable {
+		uid = auth.RootKUID
+		if kuid := creds.UserNamespace.MapToKUID(auth.RootUID); kuid.Ok() {
+			uid = kuid
 		}
-	})
-
-	fmt.Fprintf(buf, "%d %d 0 0 0 0 0\n", vss/usermem.PageSize, rss/usermem.PageSize)
-	return nil
-}
-
-// statusData implements vfs.DynamicBytesSource for /proc/[pid]/status.
-//
-// +stateify savable
-type statusData struct {
-	t     *kernel.Task
-	pidns *kernel.PIDNamespace
-}
-
-var _ vfs.DynamicBytesSource = (*statusData)(nil)
-
-// Generate implements vfs.DynamicBytesSource.Generate.
-func (s *statusData) Generate(ctx context.Context, buf *bytes.Buffer) error {
-	fmt.Fprintf(buf, "Name:\t%s\n", s.t.Name())
-	fmt.Fprintf(buf, "State:\t%s\n", s.t.StateStatus())
-	fmt.Fprintf(buf, "Tgid:\t%d\n", s.pidns.IDOfThreadGroup(s.t.ThreadGroup()))
-	fmt.Fprintf(buf, "Pid:\t%d\n", s.pidns.IDOfTask(s.t))
-	ppid := kernel.ThreadID(0)
-	if parent := s.t.Parent(); parent != nil {
-		ppid = s.pidns.IDOfThreadGroup(parent.ThreadGroup())
+		gid = auth.RootKGID
+		if kgid := creds.UserNamespace.MapToKGID(auth.RootGID); kgid.Ok() {
+			gid = kgid
+		}
 	}
-	fmt.Fprintf(buf, "PPid:\t%d\n", ppid)
-	tpid := kernel.ThreadID(0)
-	if tracer := s.t.Tracer(); tracer != nil {
-		tpid = s.pidns.IDOfTask(tracer)
+	return uid, gid
+}
+
+func newIO(t *kernel.Task, isThreadGroup bool) *ioData {
+	if isThreadGroup {
+		return &ioData{t.ThreadGroup()}
 	}
-	fmt.Fprintf(buf, "TracerPid:\t%d\n", tpid)
-	var fds int
-	var vss, rss, data uint64
-	s.t.WithMuLocked(func(t *kernel.Task) {
-		if fdTable := t.FDTable(); fdTable != nil {
-			fds = fdTable.Size()
-		}
-		if mm := t.MemoryManager(); mm != nil {
-			vss = mm.VirtualMemorySize()
-			rss = mm.ResidentSetSize()
-			data = mm.VirtualDataSize()
-		}
-	})
-	fmt.Fprintf(buf, "FDSize:\t%d\n", fds)
-	fmt.Fprintf(buf, "VmSize:\t%d kB\n", vss>>10)
-	fmt.Fprintf(buf, "VmRSS:\t%d kB\n", rss>>10)
-	fmt.Fprintf(buf, "VmData:\t%d kB\n", data>>10)
-	fmt.Fprintf(buf, "Threads:\t%d\n", s.t.ThreadGroup().Count())
-	creds := s.t.Credentials()
-	fmt.Fprintf(buf, "CapInh:\t%016x\n", creds.InheritableCaps)
-	fmt.Fprintf(buf, "CapPrm:\t%016x\n", creds.PermittedCaps)
-	fmt.Fprintf(buf, "CapEff:\t%016x\n", creds.EffectiveCaps)
-	fmt.Fprintf(buf, "CapBnd:\t%016x\n", creds.BoundingCaps)
-	fmt.Fprintf(buf, "Seccomp:\t%d\n", s.t.SeccompMode())
-	// We unconditionally report a single NUMA node. See
-	// pkg/sentry/syscalls/linux/sys_mempolicy.go.
-	fmt.Fprintf(buf, "Mems_allowed:\t1\n")
-	fmt.Fprintf(buf, "Mems_allowed_list:\t0\n")
-	return nil
-}
-
-// ioUsage is the /proc/<pid>/io and /proc/<pid>/task/<tid>/io data provider.
-type ioUsage interface {
-	// IOUsage returns the io usage data.
-	IOUsage() *usage.IO
-}
-
-// +stateify savable
-type ioData struct {
-	ioUsage
-}
-
-var _ vfs.DynamicBytesSource = (*ioData)(nil)
-
-// Generate implements vfs.DynamicBytesSource.Generate.
-func (i *ioData) Generate(ctx context.Context, buf *bytes.Buffer) error {
-	io := usage.IO{}
-	io.Accumulate(i.IOUsage())
-
-	fmt.Fprintf(buf, "char: %d\n", io.CharsRead)
-	fmt.Fprintf(buf, "wchar: %d\n", io.CharsWritten)
-	fmt.Fprintf(buf, "syscr: %d\n", io.ReadSyscalls)
-	fmt.Fprintf(buf, "syscw: %d\n", io.WriteSyscalls)
-	fmt.Fprintf(buf, "read_bytes: %d\n", io.BytesRead)
-	fmt.Fprintf(buf, "write_bytes: %d\n", io.BytesWritten)
-	fmt.Fprintf(buf, "cancelled_write_bytes: %d\n", io.BytesWriteCancelled)
-	return nil
+	return &ioData{t}
 }

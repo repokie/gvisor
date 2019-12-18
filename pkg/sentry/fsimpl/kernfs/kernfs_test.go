@@ -36,6 +36,8 @@ import (
 const defaultMode linux.FileMode = 01777
 const staticFileContent = "This is sample content for a static test file."
 
+var staticFileData = &vfs.StaticData{Data: staticFileContent}
+
 // RootDentryFn is a generator function for creating the root dentry of a test
 // filesystem. See newTestSystem.
 type RootDentryFn func(*auth.Credentials, *filesystem) *kernfs.Dentry
@@ -132,7 +134,7 @@ type file struct {
 func (fs *filesystem) newFile(creds *auth.Credentials, content string) *kernfs.Dentry {
 	f := &file{}
 	f.content = content
-	f.DynamicBytesFile.Init(creds, fs.NextIno(), f)
+	f.DynamicBytesFile.Init(creds, fs.NextIno(), f, 0777)
 
 	d := &kernfs.Dentry{}
 	d.Init(f)
@@ -221,7 +223,7 @@ func (d *dir) NewDir(ctx context.Context, name string, opts vfs.MkdirOptions) (*
 
 func (d *dir) NewFile(ctx context.Context, name string, opts vfs.OpenOptions) (*vfs.Dentry, error) {
 	creds := auth.CredentialsFromContext(ctx)
-	f := d.fs.newFile(creds, "")
+	f := kernfs.NewDynamicBytesFile(creds, d.fs.NextIno(), 0777, &vfs.StaticData{})
 	fVFSD := f.VFSDentry()
 	if err := d.OrderedChildren.Insert(name, fVFSD); err != nil {
 		f.DecRef()
@@ -254,7 +256,7 @@ func (fst *fsType) GetFilesystem(ctx context.Context, vfsObj *vfs.VirtualFilesys
 func TestBasic(t *testing.T) {
 	sys := newTestSystem(t, func(creds *auth.Credentials, fs *filesystem) *kernfs.Dentry {
 		return fs.newReadonlyDir(creds, 0755, map[string]*kernfs.Dentry{
-			"file1": fs.newFile(creds, staticFileContent),
+			"file1": kernfs.NewDynamicBytesFile(creds, fs.NextIno(), 0777, staticFileData),
 		})
 	})
 	sys.GetDentryOrDie(sys.PathOpAtRoot("file1")).DecRef()
@@ -277,7 +279,7 @@ func TestMkdirGetDentry(t *testing.T) {
 func TestReadStaticFile(t *testing.T) {
 	sys := newTestSystem(t, func(creds *auth.Credentials, fs *filesystem) *kernfs.Dentry {
 		return fs.newReadonlyDir(creds, 0755, map[string]*kernfs.Dentry{
-			"file1": fs.newFile(creds, staticFileContent),
+			"file1": kernfs.NewDynamicBytesFile(creds, fs.NextIno(), 0777, staticFileData),
 		})
 	})
 
@@ -391,7 +393,7 @@ func TestDirFDIterDirents(t *testing.T) {
 			"dir2": fs.newDir(creds, 0755, map[string]*kernfs.Dentry{
 				"dir3": fs.newDir(creds, 0755, nil),
 			}),
-			"file1": fs.newFile(creds, staticFileContent),
+			"file1": kernfs.NewDynamicBytesFile(creds, fs.NextIno(), 0777, staticFileData),
 		})
 	})
 

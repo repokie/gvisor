@@ -152,6 +152,33 @@ func (DirectoryFileDescriptionDefaultImpl) Write(ctx context.Context, src userme
 	return 0, syserror.EISDIR
 }
 
+// DynamicBytesSource represents a data source for a
+// DynamicBytesFileDescriptionImpl.
+type DynamicBytesSource interface {
+	// Generate writes the file's contents to buf.
+	Generate(ctx context.Context, buf *bytes.Buffer) error
+}
+
+// StaticData implements DynamicBytesSource over a static string.
+type StaticData struct {
+	Data string
+}
+
+// Generate implements DynamicBytesSource.
+func (s *StaticData) Generate(ctx context.Context, buf *bytes.Buffer) error {
+	buf.WriteString(s.Data)
+	return nil
+}
+
+// WritableSource extends DynamicBytesSource to allow writes to the underlying
+// source.
+type WritableSource interface {
+	DynamicBytesSource
+
+	// Write sends writes to the source.
+	Write(ctx context.Context, buf []byte) error
+}
+
 // DynamicBytesFileDescriptionImpl may be embedded by implementations of
 // FileDescriptionImpl that represent read-only regular files whose contents
 // are backed by a bytes.Buffer that is regenerated when necessary, consistent
@@ -165,13 +192,6 @@ type DynamicBytesFileDescriptionImpl struct {
 	buf      bytes.Buffer
 	off      int64
 	lastRead int64 // offset at which the last Read, PRead, or Seek ended
-}
-
-// DynamicBytesSource represents a data source for a
-// DynamicBytesFileDescriptionImpl.
-type DynamicBytesSource interface {
-	// Generate writes the file's contents to buf.
-	Generate(ctx context.Context, buf *bytes.Buffer) error
 }
 
 // SetDataSource must be called exactly once on fd before first use.
@@ -251,6 +271,56 @@ func (fd *DynamicBytesFileDescriptionImpl) Seek(ctx context.Context, offset int6
 	}
 	fd.off = offset
 	return offset, nil
+}
+
+// Preconditions: fd.mu must be locked.
+func (fd *DynamicBytesFileDescriptionImpl) pwriteLocked(ctx context.Context, src usermem.IOSequence, offset int64, opts *WriteOptions) (int64, error) {
+	writable, ok := fd.data.(WritableSource)
+	if !ok {
+		return 0, syserror.EINVAL
+	}
+
+	if offset != 0 {
+		// No need to handle partial writes thus far.
+		return 0, syserror.EINVAL
+	}
+
+	len := src.NumBytes()
+	if len > usermem.PageSize {
+		// Cap the amount of memory allocated here. Return error, instead of
+		// truncate, to make it easier to spot problems that this may cause.
+		return 0, syserror.E2BIG
+	}
+	buf := make([]byte, len)
+	n, err := src.CopyIn(ctx, buf)
+	if err != nil {
+		return int64(n), err
+	}
+
+	if err := writable.Write(ctx, buf); err != nil {
+		return 0, err
+	}
+
+	// Invalidate cached data that might exist prior to this call.
+	fd.buf.Reset()
+	return int64(n), nil
+}
+
+// PWrite implements FileDescriptionImpl.PWrite.
+func (fd *DynamicBytesFileDescriptionImpl) PWrite(ctx context.Context, src usermem.IOSequence, offset int64, opts WriteOptions) (int64, error) {
+	fd.mu.Lock()
+	n, err := fd.pwriteLocked(ctx, src, offset, &opts)
+	fd.mu.Unlock()
+	return n, err
+}
+
+// Write implements FileDescriptionImpl.Write.
+func (fd *DynamicBytesFileDescriptionImpl) Write(ctx context.Context, src usermem.IOSequence, opts WriteOptions) (int64, error) {
+	fd.mu.Lock()
+	n, err := fd.pwriteLocked(ctx, src, fd.off, &opts)
+	fd.off += n
+	fd.mu.Unlock()
+	return n, err
 }
 
 // GenericConfigureMMap may be used by most implementations of

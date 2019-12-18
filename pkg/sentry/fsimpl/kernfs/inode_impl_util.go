@@ -139,6 +139,11 @@ func (*InodeNotDirectory) Lookup(ctx context.Context, name string) (*vfs.Dentry,
 	panic("Lookup called on non-directory inode")
 }
 
+// IterDirents implements Inode.IterDirents.
+func (*InodeNotDirectory) IterDirents(ctx context.Context, callback vfs.IterDirentsCallback, offset, relOffset int64) (newOffset int64, err error) {
+	panic("IterDirents called on non-directory inode")
+}
+
 // Valid implements Inode.Valid.
 func (*InodeNotDirectory) Valid(context.Context) bool {
 	return true
@@ -154,6 +159,11 @@ type InodeNoDynamicLookup struct{}
 // Lookup implements Inode.Lookup.
 func (*InodeNoDynamicLookup) Lookup(ctx context.Context, name string) (*vfs.Dentry, error) {
 	return nil, syserror.ENOENT
+}
+
+// IterDirents implements Inode.IterDirents.
+func (*InodeNoDynamicLookup) IterDirents(ctx context.Context, callback vfs.IterDirentsCallback, offset, relOffset int64) (int64, error) {
+	return offset, nil
 }
 
 // Valid implements Inode.Valid.
@@ -252,7 +262,7 @@ func (a *InodeAttrs) SetStat(_ *vfs.Filesystem, opts vfs.SetStatOptions) error {
 }
 
 // CheckPermissions implements Inode.CheckPermissions.
-func (a *InodeAttrs) CheckPermissions(creds *auth.Credentials, ats vfs.AccessTypes) error {
+func (a *InodeAttrs) CheckPermissions(_ context.Context, creds *auth.Credentials, ats vfs.AccessTypes) error {
 	mode := a.Mode()
 	return vfs.GenericCheckPermissions(
 		creds,
@@ -489,4 +499,47 @@ func (o *OrderedChildren) nthLocked(i int64) *slot {
 		i--
 	}
 	return nil
+}
+
+// StaticDirectory is a standard implementation of a directory with static
+// contents.
+//
+// +stateify savable
+type StaticDirectory struct {
+	InodeNotSymlink
+	InodeDirectoryNoNewChildren
+	InodeAttrs
+	InodeNoDynamicLookup
+	OrderedChildren
+}
+
+var _ Inode = (*StaticDirectory)(nil)
+
+// NewStaticDir creates a new static directory and returns its dentry.
+func NewStaticDir(creds *auth.Credentials, ino uint64, perm linux.FileMode, children map[string]*Dentry) *Dentry {
+	inode := &StaticDirectory{}
+	inode.Init(creds, ino, perm)
+
+	dentry := &Dentry{}
+	dentry.Init(inode)
+
+	inode.OrderedChildren.Init(OrderedChildrenOptions{})
+	links := inode.OrderedChildren.Populate(dentry, children)
+	inode.IncLinks(links)
+
+	return dentry
+}
+
+func (s *StaticDirectory) Init(creds *auth.Credentials, ino uint64, perm linux.FileMode) {
+	if perm&^linux.PermissionsMask != 0 {
+		panic(fmt.Sprintf("Only permission mask must be set: %x", perm&linux.PermissionsMask))
+	}
+	s.InodeAttrs.Init(creds, ino, linux.ModeDirectory|perm)
+}
+
+// Open implements kernfs.Inode.
+func (s *StaticDirectory) Open(rp *vfs.ResolvingPath, vfsd *vfs.Dentry, flags uint32) (*vfs.FileDescription, error) {
+	fd := &GenericDirectoryFD{}
+	fd.Init(rp.Mount(), vfsd, &s.OrderedChildren, flags)
+	return fd.VFSFileDescription(), nil
 }

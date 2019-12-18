@@ -312,7 +312,7 @@ type inodeMetadata interface {
 	// CheckPermissions checks that creds may access this inode for the
 	// requested access type, per the the rules of
 	// fs/namei.c:generic_permission().
-	CheckPermissions(creds *auth.Credentials, atx vfs.AccessTypes) error
+	CheckPermissions(ctx context.Context, creds *auth.Credentials, atx vfs.AccessTypes) error
 
 	// Mode returns the (struct stat)::st_mode value for this inode. This is
 	// separated from Stat for performance.
@@ -396,6 +396,15 @@ type inodeDynamicLookup interface {
 	// Valid should return true if this inode is still valid, or needs to
 	// be resolved again by a call to Lookup.
 	Valid(ctx context.Context) bool
+
+	// IterDirents is used to iterate over dynamically created entries. It invokes
+	// cb on each entry in the directory represented by the FileDescription.
+	// 'offset' is the offset for the entire IterDirents call, which may include
+	// results from the caller. 'relOffset' is the offset inside the entries
+	// returned by this IterDirents invocation. In other words,
+	// 'offset+relOffset+1' is the value that should be set in vfs.Dirent.NextOff,
+	// while 'relOffset' is the place where iteration should start from.
+	IterDirents(ctx context.Context, callback vfs.IterDirentsCallback, offset, relOffset int64) (newOffset int64, err error)
 }
 
 type inodeSymlink interface {

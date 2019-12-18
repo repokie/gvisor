@@ -18,6 +18,8 @@
 #include <poll.h>
 #include <sys/socket.h>
 
+#include <memory>
+
 #include "gtest/gtest.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
@@ -109,7 +111,10 @@ Creator<SocketPair> AcceptBindSocketPairCreator(bool abstract, int domain,
       MaybeSave();  // Unlinked path.
     }
 
-    return absl::make_unique<AddrFDSocketPair>(connected, accepted, bind_addr,
+    // accepted is before connected to destruct connected before accepted.
+    // Destructors for nonstatic member objects are called in the reverse order
+    // in which they appear in the class declaration.
+    return absl::make_unique<AddrFDSocketPair>(accepted, connected, bind_addr,
                                                extra_addr);
   };
 }
@@ -311,11 +316,16 @@ PosixErrorOr<T> BindIP(int fd, bool dual_stack) {
 }
 
 template <typename T>
-PosixErrorOr<std::unique_ptr<AddrFDSocketPair>> CreateTCPAcceptBindSocketPair(
-    int bound, int connected, int type, bool dual_stack) {
-  ASSIGN_OR_RETURN_ERRNO(T bind_addr, BindIP<T>(bound, dual_stack));
-  RETURN_ERROR_IF_SYSCALL_FAIL(listen(bound, /* backlog = */ 5));
+PosixErrorOr<T> TCPBindAndListen(int fd, bool dual_stack) {
+  ASSIGN_OR_RETURN_ERRNO(T addr, BindIP<T>(fd, dual_stack));
+  RETURN_ERROR_IF_SYSCALL_FAIL(listen(fd, /* backlog = */ 5));
+  return addr;
+}
 
+template <typename T>
+PosixErrorOr<std::unique_ptr<AddrFDSocketPair>>
+CreateTCPConnectAcceptSocketPair(int bound, int connected, int type,
+                                 bool dual_stack, T bind_addr) {
   int connect_result = 0;
   RETURN_ERROR_IF_SYSCALL_FAIL(
       (connect_result = RetryEINTR(connect)(
@@ -358,14 +368,25 @@ PosixErrorOr<std::unique_ptr<AddrFDSocketPair>> CreateTCPAcceptBindSocketPair(
     absl::SleepFor(absl::Seconds(1));
   }
 
-  // Cleanup no longer needed resources.
-  RETURN_ERROR_IF_SYSCALL_FAIL(close(bound));
-  MaybeSave();  // Successful close.
-
   T extra_addr = {};
   LocalhostAddr(&extra_addr, dual_stack);
   return absl::make_unique<AddrFDSocketPair>(connected, accepted, bind_addr,
                                              extra_addr);
+}
+
+template <typename T>
+PosixErrorOr<std::unique_ptr<AddrFDSocketPair>> CreateTCPAcceptBindSocketPair(
+    int bound, int connected, int type, bool dual_stack) {
+  ASSIGN_OR_RETURN_ERRNO(T bind_addr, TCPBindAndListen<T>(bound, dual_stack));
+
+  auto result = CreateTCPConnectAcceptSocketPair(bound, connected, type,
+                                                 dual_stack, bind_addr);
+
+  // Cleanup no longer needed resources.
+  RETURN_ERROR_IF_SYSCALL_FAIL(close(bound));
+  MaybeSave();  // Successful close.
+
+  return result;
 }
 
 Creator<SocketPair> TCPAcceptBindSocketPairCreator(int domain, int type,
@@ -386,6 +407,35 @@ Creator<SocketPair> TCPAcceptBindSocketPairCreator(int domain, int type,
     }
     return CreateTCPAcceptBindSocketPair<sockaddr_in6>(bound, connected, type,
                                                        dual_stack);
+  };
+}
+
+Creator<SocketPair> TCPAcceptBindPersistentListenerSocketPairCreator(
+    int domain, int type, int protocol, bool dual_stack) {
+  return [=]() -> PosixErrorOr<std::unique_ptr<AddrFDSocketPair>> {
+    int connected;
+    RETURN_ERROR_IF_SYSCALL_FAIL(connected = socket(domain, type, protocol));
+    MaybeSave();  // Successful socket creation.
+
+    // Share the listener across invocations.
+    static int listener = socket(domain, type, protocol);
+    if (listener < 0 && errno != 0) {
+      return PosixError(errno, absl::StrCat("socket(", domain, ", ", type, ", ",
+                                            protocol, ")"));
+    }
+    MaybeSave();  // Successful socket creation.
+
+    // Bind the listener once, but create a new connect/accept pair each time.
+    if (domain == AF_INET) {
+      static auto addr =
+          TCPBindAndListen<sockaddr_in>(listener, dual_stack).ValueOrDie();
+      return CreateTCPConnectAcceptSocketPair(listener, connected, type,
+                                              dual_stack, addr);
+    }
+    static auto addr =
+        TCPBindAndListen<sockaddr_in6>(listener, dual_stack).ValueOrDie();
+    return CreateTCPConnectAcceptSocketPair(listener, connected, type,
+                                            dual_stack, addr);
   };
 }
 
@@ -518,8 +568,8 @@ size_t CalculateUnixSockAddrLen(const char* sun_path) {
   if (sun_path[0] == 0) {
     return sizeof(sockaddr_un);
   }
-  // Filesystem addresses use the address length plus the 2 byte sun_family and
-  // null terminator.
+  // Filesystem addresses use the address length plus the 2 byte sun_family
+  // and null terminator.
   return strlen(sun_path) + 3;
 }
 

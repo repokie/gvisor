@@ -20,6 +20,7 @@ go_library(
     name = "tmpfs",
     srcs = [
         "dentry_list.go",
+        "device_file.go",
         "directory.go",
         "filesystem.go",
         "named_pipe.go",
@@ -28,6 +29,7 @@ go_library(
         "tmpfs.go",
     ],
     importpath = "gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs",
+    visibility = ["//pkg/sentry:internal"],
     deps = [
         "//pkg/abi/linux",
         "//pkg/amutex",

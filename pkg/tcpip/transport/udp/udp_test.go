@@ -56,7 +56,7 @@ const (
 	multicastAddr   = "\xe8\x2b\xd3\xea"
 	multicastV6Addr = "\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 	broadcastAddr   = header.IPv4Broadcast
-	testTOS         = 0x80
+	testTOS         = 0x04
 
 	// defaultMTU is the MTU, in bytes, used throughout the tests, except
 	// where another value is explicitly used. It is chosen to match the MTU
@@ -404,6 +404,7 @@ func (c *testContext) injectV6Packet(payload []byte, h *header4Tuple, valid bool
 	// Initialize the IP header.
 	ip := header.IPv6(buf)
 	ip.Encode(&header.IPv6Fields{
+		TrafficClass:  testTOS,
 		PayloadLength: uint16(header.UDPMinimumSize + len(payload)),
 		NextHeader:    uint8(udp.ProtocolNumber),
 		HopLimit:      65,
@@ -1321,7 +1322,7 @@ func TestTOSV4(t *testing.T) {
 	}
 }
 
-func TestTOSV6(t *testing.T) {
+func TestTClassV6(t *testing.T) {
 	for _, flow := range []testFlow{unicastV4in6, unicastV6, unicastV6Only, multicastV4in6, multicastV6, broadcastIn6} {
 		t.Run(fmt.Sprintf("flow:%s", flow), func(t *testing.T) {
 			c := newDualTestContext(t, defaultMTU)
@@ -1329,17 +1330,17 @@ func TestTOSV6(t *testing.T) {
 
 			c.createEndpointForFlow(flow)
 
-			const tos = testTOS
+			const tClass = testTOS
 			var v tcpip.IPv6TrafficClassOption
 			if err := c.ep.GetSockOpt(&v); err != nil {
 				c.t.Errorf("GetSockopt failed: %s", err)
 			}
 			// Test for expected default value.
 			if v != 0 {
-				c.t.Errorf("got GetSockOpt(...) = %#v, want = %#v", v, 0)
+				c.t.Errorf("got GetSockOpt(...) = %t, want = %t", v, 0)
 			}
 
-			if err := c.ep.SetSockOpt(tcpip.IPv6TrafficClassOption(tos)); err != nil {
+			if err := c.ep.SetSockOpt(tcpip.IPv6TrafficClassOption(tClass)); err != nil {
 				c.t.Errorf("SetSockOpt failed: %s", err)
 			}
 
@@ -1347,16 +1348,17 @@ func TestTOSV6(t *testing.T) {
 				c.t.Errorf("GetSockopt failed: %s", err)
 			}
 
-			if want := tcpip.IPv6TrafficClassOption(tos); v != want {
-				c.t.Errorf("got GetSockOpt(...) = %#v, want = %#v", v, want)
+			if want := tcpip.IPv6TrafficClassOption(tClass); v != want {
+				c.t.Errorf("got GetSockOpt(...) = %t, want = %t", v, want)
 			}
 
-			testWrite(c, flow, checker.TOS(tos, 0))
+			// The header getter for TClass is called TOS, so use that checker.
+			testWrite(c, flow, checker.TOS(tClass, 0))
 		})
 	}
 }
 
-func TestReceiveTOSV4(t *testing.T) {
+func TestReceiveTOS(t *testing.T) {
 	for _, flow := range []testFlow{unicastV4, broadcast} {
 		t.Run(fmt.Sprintf("flow:%s", flow), func(t *testing.T) {
 			c := newDualTestContext(t, defaultMTU)
@@ -1395,6 +1397,49 @@ func TestReceiveTOSV4(t *testing.T) {
 			// Verify that the correct received TOS is actually handed through as
 			// ancillary data to the ControlMessages struct.
 			testRead(c, flow, checker.ReceiveTOS(testTOS))
+		})
+	}
+}
+
+func TestReceiveTClass(t *testing.T) {
+	for _, flow := range []testFlow{unicastV4in6, unicastV6, unicastV6Only, broadcastIn6} {
+		t.Run(fmt.Sprintf("flow:%s", flow), func(t *testing.T) {
+			c := newDualTestContext(t, defaultMTU)
+			defer c.cleanup()
+
+			c.createEndpointForFlow(flow)
+
+			// Verify that setting and reading the option works.
+			const recvTClass = true
+			var v tcpip.ReceiveTClassOption
+			if err := c.ep.GetSockOpt(&v); err != nil {
+				c.t.Errorf("GetSockopt failed: %s", err)
+			}
+			// Test for expected default value.
+			if v != false {
+				c.t.Errorf("got GetSockOpt(...) = %t, want = %t", v, false)
+			}
+
+			if err := c.ep.SetSockOpt(tcpip.ReceiveTClassOption(recvTClass)); err != nil {
+				c.t.Errorf("SetSockOpt(%#v) failed: %s", tcpip.ReceiveTClassOption(recvTClass), err)
+			}
+
+			if err := c.ep.GetSockOpt(&v); err != nil {
+				c.t.Errorf("GetSockopt failed: %s", err)
+			}
+
+			if want := tcpip.ReceiveTClassOption(recvTClass); v != want {
+				c.t.Errorf("got GetSockOpt(...) = %t, want = %t", v, want)
+			}
+
+			// Bind to wildcard.
+			if err := c.ep.Bind(tcpip.FullAddress{Port: stackPort}); err != nil {
+				c.t.Fatalf("Bind failed: %s", err)
+			}
+
+			// Verify that the correct received TClass is actually handed through as
+			// ancillary data to the ControlMessages struct.
+			testRead(c, flow, checker.ReceiveTClass(testTOS))
 		})
 	}
 }

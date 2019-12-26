@@ -324,11 +324,11 @@ type ControlMessages struct {
 	// TOS is the IPv4 type of service of the associated packet.
 	TOS uint8
 
-	// HasTClass indicates whether Tclass is valid/set.
+	// HasTClass indicates whether TClass is valid/set.
 	HasTClass bool
 
-	// Tclass is the IPv6 traffic class of the associated packet.
-	TClass int32
+	// TClass is the IPv6 traffic class of the associated packet.
+	TClass uint32
 }
 
 // Endpoint is the interface implemented by transport protocols (e.g., tcp, udp)
@@ -669,6 +669,10 @@ type IPv6TrafficClassOption uint8
 // ReceiveTOSOption is used by SetSockOpt/GetSockOpt to specify if the TOS
 // ancillary message is passed with incoming packets.
 type ReceiveTOSOption bool
+
+// ReceiveTClassOption is used by SetSockOpt/GetSockOpt to specify if the
+// IPV6_TCLASS ancillary message is passed with incoming packets.
+type ReceiveTClassOption bool
 
 // Route is a row in the routing table. It specifies through which NIC (and
 // gateway) sets of packets should be routed. A row is considered viable if the

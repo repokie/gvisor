@@ -1242,6 +1242,21 @@ func getSockOptIPv6(t *kernel.Task, ep commonEndpoint, name, outLen int) (interf
 		}
 		return ib, nil
 
+	case linux.IPV6_RECVTCLASS:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		var v tcpip.ReceiveTClassOption
+		if err := ep.GetSockOpt(&v); err != nil {
+			return nil, syserr.TranslateNetstackError(err)
+		}
+
+		if v {
+			return int32(1), nil
+		}
+		return int32(0), nil
+
 	default:
 		emitUnimplementedEventIPv6(t, name)
 	}
@@ -1668,6 +1683,14 @@ func setSockOptIPv6(t *kernel.Task, ep commonEndpoint, name int, optVal []byte) 
 		}
 		return syserr.TranslateNetstackError(ep.SetSockOpt(tcpip.IPv6TrafficClassOption(v)))
 
+	case linux.IPV6_RECVTCLASS:
+		v, err := parseIntOrChar(optVal)
+		if err != nil {
+			return err
+		}
+
+		return syserr.TranslateNetstackError(ep.SetSockOpt(tcpip.ReceiveTClassOption(v != 0)))
+
 	default:
 		emitUnimplementedEventIPv6(t, name)
 	}
@@ -1945,7 +1968,6 @@ func emitUnimplementedEventIPv6(t *kernel.Task, name int) {
 		linux.IPV6_RECVPATHMTU,
 		linux.IPV6_RECVPKTINFO,
 		linux.IPV6_RECVRTHDR,
-		linux.IPV6_RECVTCLASS,
 		linux.IPV6_RTHDR,
 		linux.IPV6_RTHDRDSTOPTS,
 		linux.IPV6_TCLASS,
@@ -2178,6 +2200,21 @@ func (s *SocketOperations) fillCmsgTOS(cmsg *socket.ControlMessages) {
 	cmsg.IP.TOS = s.readCM.TOS
 }
 
+func (s *SocketOperations) fillCmsgTClass(cmsg *socket.ControlMessages) {
+	if s.skType != linux.SOCK_DGRAM {
+		return
+	}
+	var receiveTClass tcpip.ReceiveTClassOption
+	if err := s.Endpoint.GetSockOpt(&receiveTClass); err != nil {
+		return
+	}
+	if !receiveTClass {
+		return
+	}
+	cmsg.IP.HasTClass = s.readCM.HasTClass
+	cmsg.IP.TClass = s.readCM.TClass
+}
+
 // nonBlockingRead issues a non-blocking read.
 //
 // TODO(b/78348848): Support timestamps for stream sockets.
@@ -2284,6 +2321,7 @@ func (s *SocketOperations) nonBlockingRead(ctx context.Context, dst usermem.IOSe
 	cmsg := s.controlMessages()
 	s.fillCmsgInq(&cmsg)
 	s.fillCmsgTOS(&cmsg)
+	s.fillCmsgTClass(&cmsg)
 	return n, flags, addr, addrLen, cmsg, syserr.FromError(err)
 }
 

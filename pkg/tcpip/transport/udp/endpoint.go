@@ -32,7 +32,8 @@ type udpPacket struct {
 	senderAddress tcpip.FullAddress
 	data          buffer.VectorisedView `state:".(buffer.VectorisedView)"`
 	timestamp     int64
-	tos           uint8
+	// tos stores either the IP_TOS or IPV6_TCLASS value.
+	tos uint8
 }
 
 // EndpointState represents the state of a UDP endpoint.
@@ -118,6 +119,10 @@ type endpoint struct {
 	// receiveTOS determines if the incoming IPv4 TOS header field is passed
 	// as ancillary data to ControlMessages on Read.
 	receiveTOS bool
+
+	// receiveTClass determines if the incoming IPv6 TClass header field is
+	// passed as ancillary data to ControlMessages on Read.
+	receiveTClass bool
 
 	// shutdownFlags represent the current shutdown state of the endpoint.
 	shutdownFlags tcpip.ShutdownFlags
@@ -254,6 +259,9 @@ func (e *endpoint) Read(addr *tcpip.FullAddress) (buffer.View, tcpip.ControlMess
 		Timestamp:    p.timestamp,
 		HasTOS:       e.receiveTOS,
 		TOS:          p.tos,
+		HasTClass:    e.receiveTClass,
+		// Although TClass is an 8-bit value it's read in the CMsg as a uint32.
+		TClass: uint32(p.tos),
 	}, nil
 }
 
@@ -672,6 +680,12 @@ func (e *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
 		e.receiveTOS = bool(v)
 		e.mu.Unlock()
 		return nil
+
+	case tcpip.ReceiveTClassOption:
+		e.mu.Lock()
+		e.receiveTClass = bool(v)
+		e.mu.Unlock()
+		return nil
 	}
 	return nil
 }
@@ -811,6 +825,12 @@ func (e *endpoint) GetSockOpt(opt interface{}) *tcpip.Error {
 	case *tcpip.ReceiveTOSOption:
 		e.mu.RLock()
 		*o = tcpip.ReceiveTOSOption(e.receiveTOS)
+		e.mu.RUnlock()
+		return nil
+
+	case *tcpip.ReceiveTClassOption:
+		e.mu.RLock()
+		*o = tcpip.ReceiveTClassOption(e.receiveTClass)
 		e.mu.RUnlock()
 		return nil
 
@@ -1265,6 +1285,8 @@ func (e *endpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, pk
 	case header.IPv4ProtocolNumber:
 		// This packet has already been validated before being passed up the stack.
 		packet.tos, _ = header.IPv4(pkt.NetworkHeader).TOS()
+	case header.IPv6ProtocolNumber:
+		packet.tos, _ = header.IPv6(pkt.NetworkHeader).TOS()
 	}
 
 	packet.timestamp = e.stack.NowNanoseconds()

@@ -249,6 +249,46 @@ TEST_P(UDPSocketPairTest, SetRecvTos) {
   EXPECT_EQ(get, kSockOptOn);
 }
 
+// Ensure that Receiving TClass is off by default.
+TEST_P(UDPSocketPairTest, RecvTClassDefault) {
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+
+  int get = -1;
+  socklen_t get_len = sizeof(get);
+  ASSERT_THAT(getsockopt(sockets->first_fd(), IPPROTO_IPV6, IPV6_RECVTCLASS,
+                         &get, &get_len),
+              SyscallSucceedsWithValue(0));
+  EXPECT_EQ(get_len, sizeof(get));
+  EXPECT_EQ(get, kSockOptOff);
+}
+
+// Test that setting and getting IPV6_RECVTCLASS works as expected.
+TEST_P(UDPSocketPairTest, SetRecvTClass) {
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+
+  ASSERT_THAT(setsockopt(sockets->first_fd(), IPPROTO_IPV6, IPV6_RECVTCLASS,
+                         &kSockOptOff, sizeof(kSockOptOff)),
+              SyscallSucceeds());
+
+  int get = -1;
+  socklen_t get_len = sizeof(get);
+  ASSERT_THAT(getsockopt(sockets->first_fd(), IPPROTO_IPV6, IPV6_RECVTCLASS,
+                         &get, &get_len),
+              SyscallSucceedsWithValue(0));
+  EXPECT_EQ(get_len, sizeof(get));
+  EXPECT_EQ(get, kSockOptOff);
+
+  ASSERT_THAT(setsockopt(sockets->first_fd(), IPPROTO_IPV6, IPV6_RECVTCLASS,
+                         &kSockOptOn, sizeof(kSockOptOn)),
+              SyscallSucceeds());
+
+  ASSERT_THAT(getsockopt(sockets->first_fd(), IPPROTO_IPV6, IPV6_RECVTCLASS,
+                         &get, &get_len),
+              SyscallSucceedsWithValue(0));
+  EXPECT_EQ(get_len, sizeof(get));
+  EXPECT_EQ(get, kSockOptOn);
+}
+
 TEST_P(UDPSocketPairTest, ReuseAddrDefault) {
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
 

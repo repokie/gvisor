@@ -19,6 +19,7 @@
 // socket.h has to be included before if_arp.h.
 #include <linux/if_arp.h>
 #include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 
 #include "test/util/file_descriptor.h"
 #include "test/util/posix_error.h"
@@ -37,6 +38,14 @@ PosixError NetlinkRequestResponse(
     const FileDescriptor& fd, void* request, size_t len,
     const std::function<void(const struct nlmsghdr* hdr)>& fn,
     bool expect_nlmsgerr);
+
+// Send the passed request then expect and return an ack or error.
+PosixError NetlinkRequestAckOrError(const FileDescriptor& fd, uint32_t seq,
+                                    void* request, size_t len);
+
+// Find rtnetlink attribute in message.
+const struct rtattr* FindRtAttr(const struct nlmsghdr* hdr,
+                                const struct ifinfomsg* msg, int16_t attr);
 
 }  // namespace testing
 }  // namespace gvisor

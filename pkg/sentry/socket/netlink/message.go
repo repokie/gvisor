@@ -32,6 +32,7 @@ func alignUp(length int, align uint) int {
 
 // Message contains a complete serialized netlink message.
 type Message struct {
+	hdr linux.NetlinkMessageHeader
 	buf []byte
 }
 
@@ -40,8 +41,53 @@ type Message struct {
 // The header length will be updated by Finalize.
 func NewMessage(hdr linux.NetlinkMessageHeader) *Message {
 	return &Message{
+		hdr: hdr,
 		buf: binary.Marshal(nil, usermem.ByteOrder, hdr),
 	}
+}
+
+// ParseMessage parses the first message seen at buf, returning the rest of the
+// buffer. If message is malformed, ok of false is returned.
+func ParseMessage(buf []byte) (msg *Message, rest []byte, ok bool) {
+	if len(buf) < linux.NetlinkMessageHeaderSize {
+		return nil, nil, false
+	}
+
+	var hdr linux.NetlinkMessageHeader
+	binary.Unmarshal(buf[:linux.NetlinkMessageHeaderSize], usermem.ByteOrder, &hdr)
+
+	if hdr.Length < linux.NetlinkMessageHeaderSize || uint64(hdr.Length) > uint64(len(buf)) {
+		return nil, nil, false
+	}
+
+	// Next message offset.
+	next := alignUp(int(hdr.Length), linux.NLMSG_ALIGNTO)
+	if next >= len(buf)-1 {
+		next = len(buf) - 1
+	}
+
+	return &Message{
+		hdr: hdr,
+		buf: buf[:hdr.Length],
+	}, buf[next:], true
+}
+
+// Header returns the header of this message.
+func (m *Message) Header() linux.NetlinkMessageHeader {
+	return m.hdr
+}
+
+// GetData unmarshals the payload message header from this netlink message, and
+// returns the attributes portion.
+func (m *Message) GetData(msg interface{}) (AttrsView, bool) {
+	size := binary.Size(msg)
+	aligned := alignUp(linux.NetlinkMessageHeaderSize+int(size), linux.NLMSG_ALIGNTO)
+	if m.hdr.Length < uint32(aligned) {
+		return nil, false
+	}
+	data := m.buf[linux.NetlinkMessageHeaderSize:]
+	binary.Unmarshal(data[:size], usermem.ByteOrder, msg)
+	return AttrsView(data[size:]), true
 }
 
 // Finalize returns the []byte containing the entire message, with the total
@@ -156,4 +202,27 @@ func (ms *MessageSet) AddMessage(hdr linux.NetlinkMessageHeader) *Message {
 	m := NewMessage(hdr)
 	ms.Messages = append(ms.Messages, m)
 	return m
+}
+
+// AttrsView is a view into the attributes portion of a netlink message.
+type AttrsView []byte
+
+// Empty returns whether there is no attribute left in v.
+func (v AttrsView) Empty() bool {
+	return len(v) == 0
+}
+
+// Next parses first netlink attribute at the beginning of v.
+func (v AttrsView) Next() (hdr linux.NetlinkAttrHeader, value []byte, rest AttrsView, ok bool) {
+	hdrSize := linux.NetlinkAttrHeaderSize
+	if len(v) < hdrSize {
+		return linux.NetlinkAttrHeader{}, nil, nil, false
+	}
+	binary.Unmarshal(v[:hdrSize], usermem.ByteOrder, &hdr)
+
+	aligned := alignUp(int(hdr.Length), linux.NLA_ALIGNTO)
+	if len(v) < aligned {
+		return linux.NetlinkAttrHeader{}, nil, nil, false
+	}
+	return hdr, v[hdrSize:int(hdr.Length)], v[aligned:], true
 }

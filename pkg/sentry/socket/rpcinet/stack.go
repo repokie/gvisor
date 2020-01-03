@@ -23,6 +23,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/socket/rpcinet/conn"
 	"gvisor.dev/gvisor/pkg/sentry/socket/rpcinet/notifier"
 	"gvisor.dev/gvisor/pkg/syserr"
+	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/unet"
 )
@@ -115,6 +116,11 @@ func (s *Stack) InterfaceAddrs() map[int32][]inet.InterfaceAddr {
 		addrs[k] = append([]inet.InterfaceAddr(nil), v...)
 	}
 	return addrs
+}
+
+// AddInterfaceAddr implements inet.Stack.AddInterfaceAddr.
+func (s *Stack) AddInterfaceAddr(idx int32, addr inet.InterfaceAddr) error {
+	return syserror.EACCES
 }
 
 // SupportsIPv6 implements inet.Stack.SupportsIPv6.

@@ -150,7 +150,8 @@ var Metrics = tcpip.Stats{
 	TCP: tcpip.TCPStats{
 		ActiveConnectionOpenings:           mustCreateMetric("/netstack/tcp/active_connection_openings", "Number of connections opened successfully via Connect."),
 		PassiveConnectionOpenings:          mustCreateMetric("/netstack/tcp/passive_connection_openings", "Number of connections opened successfully via Listen."),
-		CurrentEstablished:                 mustCreateMetric("/netstack/tcp/current_established", "Number of connections in either ESTABLISHED or CLOSE-WAIT state now."),
+		CurrentEstablished:                 mustCreateMetric("/netstack/tcp/current_established", "Number of connections in ESTABLISHED state now."),
+		CurrentConnected:                   mustCreateMetric("/netstack/tcp/current_open", "Number of connections that are in connected state."),
 		EstablishedResets:                  mustCreateMetric("/netstack/tcp/established_resets", "Number of times TCP connections have made a direct transition to the CLOSED state from either the ESTABLISHED state or the CLOSE-WAIT state"),
 		EstablishedClosed:                  mustCreateMetric("/netstack/tcp/established_closed", "number of times established TCP connections made a transition to CLOSED state."),
 		EstablishedTimedout:                mustCreateMetric("/netstack/tcp/established_timedout", "Number of times  an established connection was reset because of keep-alive time out."),
@@ -1259,6 +1260,18 @@ func getSockOptTCP(t *kernel.Task, ep commonEndpoint, name, outLen int) (interfa
 
 		return int32(time.Duration(v) / time.Second), nil
 
+	case linux.TCP_DEFER_ACCEPT:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		var v tcpip.TCPDeferAcceptOption
+		if err := ep.GetSockOpt(&v); err != nil {
+			return nil, syserr.TranslateNetstackError(err)
+		}
+
+		return int32(time.Duration(v) / time.Second), nil
+
 	default:
 		emitUnimplementedEventTCP(t, name)
 	}
@@ -1711,6 +1724,16 @@ func setSockOptTCP(t *kernel.Task, ep commonEndpoint, name int, optVal []byte) *
 
 		v := usermem.ByteOrder.Uint32(optVal)
 		return syserr.TranslateNetstackError(ep.SetSockOpt(tcpip.TCPLingerTimeoutOption(time.Second * time.Duration(v))))
+
+	case linux.TCP_DEFER_ACCEPT:
+		if len(optVal) < sizeOfInt32 {
+			return syserr.ErrInvalidArgument
+		}
+		v := int32(usermem.ByteOrder.Uint32(optVal))
+		if v < 0 {
+			v = 0
+		}
+		return syserr.TranslateNetstackError(ep.SetSockOpt(tcpip.TCPDeferAcceptOption(time.Second * time.Duration(v))))
 
 	case linux.TCP_REPAIR_OPTIONS:
 		t.Kernel().EmitUnimplementedEvent(t)
@@ -2192,7 +2215,9 @@ func (s *SocketOperations) GetPeerName(t *kernel.Task) (linux.SockAddr, uint32, 
 		return nil, 0, syserr.TranslateNetstackError(err)
 	}
 
+	log.Infof("s.family: %s, remote: %s", s.family, addr)
 	a, l := ConvertAddress(s.family, addr)
+	log.Infof("a : %+v, l: %d", a, l)
 	return a, l, nil
 }
 

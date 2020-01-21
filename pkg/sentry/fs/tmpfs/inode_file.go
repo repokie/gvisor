@@ -444,9 +444,14 @@ func (rw *fileReadWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error)
 	defer rw.f.dataMu.Unlock()
 
 	// Compute the range to write.
-	end := fs.WriteEndOffset(rw.offset, int64(srcs.NumBytes()))
-	if end == rw.offset { // srcs.NumBytes() == 0?
+	if srcs.NumBytes() == 0 {
+		// Nothing to do.
 		return 0, nil
+	}
+	end := fs.WriteEndOffset(rw.offset, int64(srcs.NumBytes()))
+	if end == rw.offset {
+		// Overflow.
+		return 0, syserror.EINVAL
 	}
 
 	// Check if seals prevent either file growth or all writes.

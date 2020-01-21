@@ -225,6 +225,12 @@ func Splice(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 			if _, err := t.CopyIn(outOffset, &offset); err != nil {
 				return 0, nil, err
 			}
+
+			// The offset must be valid.
+			if offset < 0 {
+				return 0, nil, syserror.EINVAL
+			}
+
 			// Use the destination offset.
 			opts.DstOffset = true
 			opts.DstStart = offset
@@ -242,6 +248,12 @@ func Splice(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 			if _, err := t.CopyIn(inOffset, &offset); err != nil {
 				return 0, nil, err
 			}
+
+			// The offset must be valid.
+			if offset < 0 {
+				return 0, nil, syserror.EINVAL
+			}
+
 			// Use the source offset.
 			opts.SrcOffset = true
 			opts.SrcStart = offset

@@ -8,6 +8,7 @@ go_library(
     importpath = "gvisor.dev/gvisor/pkg/tcpip/link/channel",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/sync",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
         "//pkg/tcpip/stack",

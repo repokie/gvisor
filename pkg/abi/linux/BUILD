@@ -29,6 +29,8 @@ go_library(
         "futex.go",
         "inotify.go",
         "ioctl.go",
+        "ioctl_helpers.go",
+        "ioctl_tun.go",
         "ip.go",
         "ipc.go",
         "limits.go",

@@ -18,6 +18,7 @@
 package channel
 
 import (
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -28,6 +29,91 @@ type PacketInfo struct {
 	Pkt   tcpip.PacketBuffer
 	Proto tcpip.NetworkProtocolNumber
 	GSO   *stack.GSO
+	Route *stack.Route
+}
+
+// Notification is the interface for receiving notification from the packet
+// queue.
+type Notification interface {
+	// WriteNotify will be called when a write happens to the queue.
+	WriteNotify()
+}
+
+// NotificationHandle is an opaque handle to the registered notification target.
+// It can be used to unregister the notification when no longer interested.
+type NotificationHandle struct {
+	n Notification
+}
+
+type queue struct {
+	mu       sync.RWMutex
+	c        chan PacketInfo
+	numWrite int
+	numRead  int
+	notify   []*NotificationHandle
+}
+
+func (q *queue) Read() (PacketInfo, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	select {
+	case p := <-q.c:
+		q.numRead++
+		return p, true
+	default:
+		return PacketInfo{}, false
+	}
+}
+
+func (q *queue) Write(p PacketInfo) bool {
+	wrote := false
+
+	q.mu.Lock()
+	select {
+	case q.c <- p:
+		wrote = true
+		q.numWrite++
+	default:
+	}
+	notify := q.notify
+	q.mu.Unlock()
+
+	// Send notification outside of lock.
+	for _, h := range notify {
+		h.n.WriteNotify()
+	}
+	return wrote
+}
+
+func (q *queue) Num() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	n := q.numWrite - q.numRead
+	if n < 0 {
+		panic("numWrite < numRead")
+	}
+	return n
+}
+
+func (q *queue) AddNotify(notify Notification) *NotificationHandle {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	h := &NotificationHandle{n: notify}
+	q.notify = append(q.notify, h)
+	return h
+}
+
+func (q *queue) RemoveNotify(handle *NotificationHandle) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	// Make a copy, since we reads the array outside of lock when notifying.
+	notify := make([]*NotificationHandle, 0, len(q.notify))
+	for _, h := range q.notify {
+		if h != handle {
+			notify = append(notify, h)
+		}
+	}
+	q.notify = notify
 }
 
 // Endpoint is link layer endpoint that stores outbound packets in a channel
@@ -38,14 +124,16 @@ type Endpoint struct {
 	linkAddr   tcpip.LinkAddress
 	GSO        bool
 
-	// C is where outbound packets are queued.
-	C chan PacketInfo
+	// Outbound packet queue.
+	q *queue
 }
 
 // New creates a new channel endpoint.
 func New(size int, mtu uint32, linkAddr tcpip.LinkAddress) *Endpoint {
 	return &Endpoint{
-		C:        make(chan PacketInfo, size),
+		q: &queue{
+			c: make(chan PacketInfo, size),
+		},
 		mtu:      mtu,
 		linkAddr: linkAddr,
 	}
@@ -55,13 +143,21 @@ func New(size int, mtu uint32, linkAddr tcpip.LinkAddress) *Endpoint {
 func (e *Endpoint) Drain() int {
 	c := 0
 	for {
-		select {
-		case <-e.C:
-			c++
-		default:
+		if _, ok := e.Read(); !ok {
 			return c
 		}
+		c++
 	}
+}
+
+// Read does non-blocking read one packet from the outbound packet queue.
+func (e *Endpoint) Read() (PacketInfo, bool) {
+	return e.q.Read()
+}
+
+// NumQueued returns the number of packet queued for outbound.
+func (e *Endpoint) NumQueued() int {
+	return e.q.Num()
 }
 
 // InjectInbound injects an inbound packet.
@@ -117,26 +213,23 @@ func (e *Endpoint) LinkAddress() tcpip.LinkAddress {
 }
 
 // WritePacket stores outbound packets into the channel.
-func (e *Endpoint) WritePacket(_ *stack.Route, gso *stack.GSO, protocol tcpip.NetworkProtocolNumber, pkt tcpip.PacketBuffer) *tcpip.Error {
+func (e *Endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.NetworkProtocolNumber, pkt tcpip.PacketBuffer) *tcpip.Error {
 	p := PacketInfo{
 		Pkt:   pkt,
 		Proto: protocol,
 		GSO:   gso,
+		Route: r,
 	}
 
-	select {
-	case e.C <- p:
-	default:
-	}
+	e.q.Write(p)
 
 	return nil
 }
 
 // WritePackets stores outbound packets into the channel.
-func (e *Endpoint) WritePackets(_ *stack.Route, gso *stack.GSO, pkts []tcpip.PacketBuffer, protocol tcpip.NetworkProtocolNumber) (int, *tcpip.Error) {
+func (e *Endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts []tcpip.PacketBuffer, protocol tcpip.NetworkProtocolNumber) (int, *tcpip.Error) {
 	payloadView := pkts[0].Data.ToView()
 	n := 0
-packetLoop:
 	for _, pkt := range pkts {
 		off := pkt.DataOffset
 		size := pkt.DataSize
@@ -147,14 +240,13 @@ packetLoop:
 			},
 			Proto: protocol,
 			GSO:   gso,
+			Route: r,
 		}
 
-		select {
-		case e.C <- p:
-			n++
-		default:
-			break packetLoop
+		if !e.q.Write(p) {
+			break
 		}
+		n++
 	}
 
 	return n, nil
@@ -166,15 +258,24 @@ func (e *Endpoint) WriteRawPacket(vv buffer.VectorisedView) *tcpip.Error {
 		Pkt:   tcpip.PacketBuffer{Data: vv},
 		Proto: 0,
 		GSO:   nil,
+		Route: nil,
 	}
 
-	select {
-	case e.C <- p:
-	default:
-	}
+	e.q.Write(p)
 
 	return nil
 }
 
 // Wait implements stack.LinkEndpoint.Wait.
 func (*Endpoint) Wait() {}
+
+// AddNotify adds a notification target for receiving event about outgoing
+// packets.
+func (e *Endpoint) AddNotify(notify Notification) *NotificationHandle {
+	return e.q.AddNotify(notify)
+}
+
+// RemoveNotify removes handle from the list of notification targets.
+func (e *Endpoint) RemoveNotify(handle *NotificationHandle) {
+	e.q.RemoveNotify(handle)
+}

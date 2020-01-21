@@ -1,3 +1,4 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("//tools/go_stateify:defs.bzl", "go_library")
 
 package(licenses = ["notice"])
@@ -32,5 +33,17 @@ go_library(
         "//pkg/syserror",
         "//pkg/tcpip",
         "//pkg/waiter",
+    ],
+)
+
+go_test(
+    name = "netlink_test",
+    size = "small",
+    srcs = [
+        "message_test.go",
+    ],
+    deps = [
+        ":netlink",
+        "//pkg/abi/linux",
     ],
 )

@@ -4,16 +4,20 @@ package(licenses = ["notice"])
 
 go_library(
     name = "route",
-    srcs = ["protocol.go"],
+    srcs = [
+        "protocol.go",
+    ],
     importpath = "gvisor.dev/gvisor/pkg/sentry/socket/netlink/route",
     visibility = ["//pkg/sentry:internal"],
     deps = [
         "//pkg/abi/linux",
+        "//pkg/binary",
         "//pkg/sentry/context",
         "//pkg/sentry/inet",
         "//pkg/sentry/kernel",
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/socket/netlink",
+        "//pkg/sentry/usermem",
         "//pkg/syserr",
     ],
 )

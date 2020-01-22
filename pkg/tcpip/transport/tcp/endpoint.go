@@ -121,6 +121,8 @@ const (
 	notifyDrain
 	notifyReset
 	notifyResetByPeer
+	// notifyAbort is a request for an expedited teardown.
+	notifyAbort
 	notifyKeepaliveChanged
 	notifyMSSChanged
 	// notifyTickleWorker is used to tickle the protocol main loop during a
@@ -776,6 +778,15 @@ func (e *endpoint) notifyProtocolGoroutine(n uint32) {
 			return
 		}
 	}
+}
+
+// Abort implements stack.TransportEndpoint.Abort.
+func (e *endpoint) Abort() {
+	if e.EndpointState().connected() {
+		e.notifyProtocolGoroutine(notifyAbort)
+		return
+	}
+	e.Close()
 }
 
 // Close puts the endpoint in a closed state and frees all resources associated

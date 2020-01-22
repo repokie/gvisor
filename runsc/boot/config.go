@@ -256,6 +256,8 @@ type Config struct {
 	//
 	// E.g. 0.2 CPU quota will result in 1, and 1.9 in 2.
 	CPUNumFromQuota bool
+
+	VFS2 bool
 }
 
 // ToFlags returns a slice of flags that correspond to the given Config.
@@ -287,6 +289,7 @@ func (c *Config) ToFlags() []string {
 		"--gso=" + strconv.FormatBool(c.HardwareGSO),
 		"--software-gso=" + strconv.FormatBool(c.SoftwareGSO),
 		"--overlayfs-stale-read=" + strconv.FormatBool(c.OverlayfsStaleRead),
+		"--vfs2=" + strconv.FormatBool(c.VFS2),
 	}
 	if c.CPUNumFromQuota {
 		f = append(f, "--cpu-num-from-quota")

@@ -65,6 +65,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/unimpl"
 	uspb "gvisor.dev/gvisor/pkg/sentry/unimpl/unimplemented_syscall_go_proto"
 	"gvisor.dev/gvisor/pkg/sentry/uniqueid"
+	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/state"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -441,8 +442,8 @@ func (k *Kernel) flushMountSourceRefs() error {
 	})
 }
 
-// forEachFDPaused applies the given function to each open file descriptor in each
-// task.
+// forEachFDPaused applies the given function to each open file descriptor in
+// each task.
 //
 // Precondition: Must be called with the kernel paused.
 func (ts *TaskSet) forEachFDPaused(f func(*fs.File) error) (err error) {
@@ -453,7 +454,7 @@ func (ts *TaskSet) forEachFDPaused(f func(*fs.File) error) (err error) {
 		if t.fdTable == nil {
 			continue
 		}
-		t.fdTable.forEach(func(_ int32, file *fs.File, _ FDFlags) {
+		t.fdTable.forEach(func(_ int32, file *fs.File, _ *vfs.FileDescription, _ FDFlags) {
 			if lastErr := f(file); lastErr != nil && err == nil {
 				err = lastErr
 			}
@@ -519,7 +520,7 @@ func (ts *TaskSet) unregisterEpollWaiters() {
 	for t := range ts.Root.tids {
 		// We can skip locking Task.mu here since the kernel is paused.
 		if t.fdTable != nil {
-			t.fdTable.forEach(func(_ int32, file *fs.File, _ FDFlags) {
+			t.fdTable.forEach(func(_ int32, file *fs.File, _ *vfs.FileDescription, _ FDFlags) {
 				if e, ok := file.FileOperations.(*epoll.EventPoll); ok {
 					e.UnregisterEpollWaiters()
 				}
@@ -921,7 +922,7 @@ func (k *Kernel) pauseTimeLocked() {
 		// This means we'll iterate FDTables shared by multiple tasks repeatedly,
 		// but ktime.Timer.Pause is idempotent so this is harmless.
 		if t.fdTable != nil {
-			t.fdTable.forEach(func(_ int32, file *fs.File, _ FDFlags) {
+			t.fdTable.forEach(func(_ int32, file *fs.File, _ *vfs.FileDescription, _ FDFlags) {
 				if tfd, ok := file.FileOperations.(*timerfd.TimerOperations); ok {
 					tfd.PauseTimer()
 				}
@@ -951,7 +952,7 @@ func (k *Kernel) resumeTimeLocked() {
 			}
 		}
 		if t.fdTable != nil {
-			t.fdTable.forEach(func(_ int32, file *fs.File, _ FDFlags) {
+			t.fdTable.forEach(func(_ int32, file *fs.File, _ *vfs.FileDescription, _ FDFlags) {
 				if tfd, ok := file.FileOperations.(*timerfd.TimerOperations); ok {
 					tfd.ResumeTimer()
 				}

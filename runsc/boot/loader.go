@@ -42,6 +42,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/sighandling"
+	"gvisor.dev/gvisor/pkg/sentry/syscalls/linux/vfs2"
 	"gvisor.dev/gvisor/pkg/sentry/time"
 	"gvisor.dev/gvisor/pkg/sentry/usage"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
@@ -67,6 +68,18 @@ import (
 	_ "gvisor.dev/gvisor/pkg/sentry/socket/netlink/uevent"
 	"gvisor.dev/gvisor/pkg/sentry/socket/netstack"
 	_ "gvisor.dev/gvisor/pkg/sentry/socket/unix"
+)
+
+var (
+	// syscallTable is the syscall table to be used. It's set in init() depending
+	// on the build architecture.
+	syscallTable *kernel.SyscallTable
+
+	// registerSyscallOnce ensures kernel.RegisterSyscallTable() is only called
+	// once per process. This is only needed for tests that instantiate many
+	// Loader's in the same process.
+	registerSyscallOnce sync.Once
+	vfs2Enabled         bool
 )
 
 // Loader keeps state needed to start the kernel and run the container..
@@ -183,6 +196,8 @@ func New(args Args) (*Loader, error) {
 	if err := usage.Init(); err != nil {
 		return nil, fmt.Errorf("setting up memory usage: %v", err)
 	}
+
+	registerSyscallTable(args.Conf)
 
 	// Create kernel and platform.
 	p, err := createPlatform(args.Conf, args.Device)
@@ -349,6 +364,19 @@ func New(args Args) (*Loader, error) {
 	}
 
 	return l, nil
+}
+
+func registerSyscallTable(conf *Config) {
+	registerSyscallOnce.Do(func() {
+		if conf.VFS2 {
+			vfs2Enabled = true
+			vfs2.Override(syscallTable.Table)
+		}
+		kernel.RegisterSyscallTable(syscallTable)
+	})
+	if conf.VFS2 != vfs2Enabled {
+		panic("syscall table already initialized with different configuration")
+	}
 }
 
 // newProcess creates a process that can be run with kernel.CreateProcess.

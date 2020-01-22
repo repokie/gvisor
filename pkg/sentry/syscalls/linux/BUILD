@@ -95,6 +95,7 @@ go_library(
         "//pkg/sentry/syscalls",
         "//pkg/sentry/usage",
         "//pkg/sentry/usermem",
+        "//pkg/sentry/vfs",
         "//pkg/sync",
         "//pkg/syserr",
         "//pkg/syserror",

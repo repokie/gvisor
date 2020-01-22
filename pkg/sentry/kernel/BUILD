@@ -207,6 +207,7 @@ go_library(
         "//pkg/sentry/uniqueid",
         "//pkg/sentry/usage",
         "//pkg/sentry/usermem",
+        "//pkg/sentry/vfs",
         "//pkg/state",
         "//pkg/state/statefile",
         "//pkg/sync",

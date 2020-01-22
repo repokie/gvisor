@@ -1,4 +1,4 @@
-// Copyright 2019 The gVisor Authors.
+// Copyright 2020 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build arm64
+package vfs2
 
-package boot
+import (
+	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/syscalls"
+)
 
-func init() {
-	syscallTable = linux.ARM64
+func Override(table map[uintptr]kernel.Syscall) {
+	table[0] = syscalls.Supported("read", Read)
 }

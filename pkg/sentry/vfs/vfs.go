@@ -75,10 +75,26 @@ type VirtualFilesystem struct {
 	// mountpoints is analogous to Linux's mountpoint_hashtable.
 	mountpoints map[*Dentry]map[*Mount]struct{}
 
+	// anonMount is a Mount, not included in mounts or mountpoints,
+	// representing an anonFilesystem. anonMount is used to back
+	// VirtualDentries returned by VirtualFilesystem.NewAnonVirtualDentry().
+	// anonMount is immutable.
+	//
+	// anonMount is analogous to Linux's anon_inode_mnt.
+	anonMount *Mount
+
 	// devices contains all registered Devices. devices is protected by
 	// devicesMu.
 	devicesMu sync.RWMutex
 	devices   map[devTuple]*registeredDevice
+
+	// anonBlockDevMinor contains all allocated anonymous block device minor
+	// numbers. anonBlockDevMinorNext is a lower bound for the smallest
+	// unallocated anonymous block device number. anonBlockDevMinorNext and
+	// anonBlockDevMinor are protected by anonBlockDevMinorMu.
+	anonBlockDevMinorMu   sync.Mutex
+	anonBlockDevMinorNext uint32
+	anonBlockDevMinor     map[uint32]struct{}
 
 	// fsTypes contains all registered FilesystemTypes. fsTypes is protected by
 	// fsTypesMu.
@@ -94,12 +110,30 @@ type VirtualFilesystem struct {
 // New returns a new VirtualFilesystem with no mounts or FilesystemTypes.
 func New() *VirtualFilesystem {
 	vfs := &VirtualFilesystem{
-		mountpoints: make(map[*Dentry]map[*Mount]struct{}),
-		devices:     make(map[devTuple]*registeredDevice),
-		fsTypes:     make(map[string]*registeredFilesystemType),
-		filesystems: make(map[*Filesystem]struct{}),
+		mountpoints:           make(map[*Dentry]map[*Mount]struct{}),
+		devices:               make(map[devTuple]*registeredDevice),
+		anonBlockDevMinorNext: 1,
+		anonBlockDevMinor:     make(map[uint32]struct{}),
+		fsTypes:               make(map[string]*registeredFilesystemType),
+		filesystems:           make(map[*Filesystem]struct{}),
 	}
 	vfs.mounts.Init()
+
+	// Construct vfs.anonMount.
+	anonfsDevMinor, err := vfs.GetAnonBlockDevMinor()
+	if err != nil {
+		panic(fmt.Sprintf("VirtualFilesystem.GetAnonBlockDevMinor() failed during VirtualFilesystem construction: %v", err))
+	}
+	anonfs := anonFilesystem{
+		devMinor: anonfsDevMinor,
+	}
+	anonfs.vfsfs.Init(vfs, &anonfs)
+	vfs.anonMount = &Mount{
+		vfs:  vfs,
+		fs:   &anonfs.vfsfs,
+		refs: 1,
+	}
+
 	return vfs
 }
 

@@ -6,6 +6,7 @@ package(licenses = ["notice"])
 go_library(
     name = "vfs",
     srcs = [
+        "anonfs.go",
         "context.go",
         "debug.go",
         "dentry.go",
@@ -21,7 +22,6 @@ go_library(
         "pathname.go",
         "permissions.go",
         "resolving_path.go",
-        "testutil.go",
         "vfs.go",
     ],
     importpath = "gvisor.dev/gvisor/pkg/sentry/vfs",
@@ -52,7 +52,6 @@ go_test(
         "//pkg/abi/linux",
         "//pkg/sentry/context",
         "//pkg/sentry/context/contexttest",
-        "//pkg/sentry/kernel/auth",
         "//pkg/sentry/usermem",
         "//pkg/sync",
         "//pkg/syserror",

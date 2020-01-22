@@ -19,6 +19,16 @@ exports_files(
     visibility = ["//:sandbox"],
 )
 
+config_setting(
+    name = "x86_64",
+    constraint_values = ["@bazel_tools//platforms:x86_64"],
+)
+
+config_setting(
+    name = "aarch64",
+    constraint_values = ["@bazel_tools//platforms:aarch64"],
+)
+
 cc_binary(
     name = "sigaltstack_check",
     testonly = 1,

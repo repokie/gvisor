@@ -132,6 +132,30 @@ TEST(EventfdTest, BigWriteBigRead) {
   EXPECT_EQ(l[0], 1);
 }
 
+TEST(EventfdTest, Splice) {
+  int pipes[2];
+  ASSERT_THAT(pipe2(pipes, O_NONBLOCK), SyscallSucceeds());
+  const FileDescriptor read_fd(pipes[0]);
+  const FileDescriptor write_fd(pipes[1]);
+  constexpr uint64_t kVal = 0xfffffffffffffffb;
+
+  FileDescriptor efd = ASSERT_NO_ERRNO_AND_VALUE(NewEventFD(0, EFD_NONBLOCK));
+
+  uint64_t l[2];
+  l[0] = kVal;
+  l[1] = kVal;
+  ASSERT_THAT(write(write_fd.get(), l, sizeof(l)),
+              SyscallSucceedsWithValue(sizeof(l)));
+  EXPECT_THAT(splice(read_fd.get(), nullptr, efd.get(), nullptr,
+                     sizeof(l[0]) + 1, SPLICE_F_NONBLOCK),
+              SyscallSucceedsWithValue(sizeof(l[0])));
+
+  uint64_t val;
+  ASSERT_THAT(read(efd.get(), &val, sizeof(val)),
+              SyscallSucceedsWithValue(sizeof(val)));
+  EXPECT_EQ(val, kVal);
+}
+
 // NotifyNonZero is inherently racy, so random save is disabled.
 TEST(EventfdTest, NotifyNonZero_NoRandomSave) {
   // Waits will time out at 10 seconds.

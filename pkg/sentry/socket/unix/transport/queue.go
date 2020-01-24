@@ -98,47 +98,63 @@ func (q *queue) IsWritable() bool {
 	return q.closed || q.bufWritable()
 }
 
+// CheckEnqueue checks if a message of a given length can be enqueued.
+//
+// It returns the number of bytes that can be enqueued (which may be less than
+// the original length if truncate is allowed) and whether the enqueue operation
+// is ok. If all msgLen bytes cannot be enqueued, err indicates why.
+//
+// Precondition: q.mu must be held to call this method.
+func (q *queue) CheckEnqueue(msgLen int64, truncate bool) (l int64, ok bool, err *syserr.Error) {
+	if q.closed {
+		return 0, false, syserr.ErrClosedForSend
+	}
+
+	l = msgLen
+	free := q.limit - q.used
+
+	if l > free && truncate {
+		if free == 0 {
+			// Message can't fit right now.
+			return 0, false, syserr.ErrWouldBlock
+		}
+
+		l = free
+		err = syserr.ErrWouldBlock
+	}
+
+	if l > q.limit {
+		// Message is too big to ever fit.
+		return 0, false, syserr.ErrMessageTooLong
+	}
+
+	if l > free {
+		// Message can't fit right now, and could not be truncated.
+		return 0, false, syserr.ErrWouldBlock
+	}
+
+	return l, true, err
+}
+
 // Enqueue adds an entry to the data queue if room is available.
 //
 // If truncate is true, Enqueue may truncate the message before enqueuing it.
-// Otherwise, the entire message must fit. If n < e.Length(), err indicates why.
+// Otherwise, the entire message must fit. If l < e.Length(), err indicates why.
 //
 // If notify is true, ReaderQueue.Notify must be called:
 // q.ReaderQueue.Notify(waiter.EventIn)
 func (q *queue) Enqueue(e *message, truncate bool) (l int64, notify bool, err *syserr.Error) {
 	q.mu.Lock()
 
-	if q.closed {
+	l, ok, err := q.CheckEnqueue(e.Length(), truncate)
+	if !ok {
 		q.mu.Unlock()
-		return 0, false, syserr.ErrClosedForSend
+		return 0, false, err
 	}
 
-	free := q.limit - q.used
-
-	l = e.Length()
-
-	if l > free && truncate {
-		if free == 0 {
-			// Message can't fit right now.
-			q.mu.Unlock()
-			return 0, false, syserr.ErrWouldBlock
-		}
-
-		e.Truncate(free)
-		l = e.Length()
-		err = syserr.ErrWouldBlock
-	}
-
-	if l > q.limit {
-		// Message is too big to ever fit.
-		q.mu.Unlock()
-		return 0, false, syserr.ErrMessageTooLong
-	}
-
-	if l > free {
-		// Message can't fit right now.
-		q.mu.Unlock()
-		return 0, false, syserr.ErrWouldBlock
+	// Truncate if necessary.
+	if l < e.Length() {
+		e.Truncate(l)
 	}
 
 	notify = q.dataList.Front() == nil

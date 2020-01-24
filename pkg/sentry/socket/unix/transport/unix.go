@@ -675,12 +675,21 @@ func (e *connectedEndpoint) Send(data [][]byte, controlMessages ControlMessages,
 		}
 	}
 
+	q := e.writeQueue
+
+	q.mu.Lock()
+	l, ok, err := q.CheckEnqueue(l, truncate)
+	q.mu.Unlock()
+	if !ok {
+		return 0, false, err
+	}
+
 	v := make([]byte, 0, l)
-	for _, d := range data {
+	for _, d := range data[:l] {
 		v = append(v, d...)
 	}
 
-	l, notify, err := e.writeQueue.Enqueue(&message{Data: buffer.View(v), Control: controlMessages, Address: from}, truncate)
+	l, notify, err := q.Enqueue(&message{Data: buffer.View(v), Control: controlMessages, Address: from}, truncate)
 	return int64(l), notify, err
 }
 

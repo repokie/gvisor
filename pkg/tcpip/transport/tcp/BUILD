@@ -92,6 +92,7 @@ go_test(
     tags = ["flaky"],
     deps = [
         ":tcp",
+        "//pkg/sync",
         "//pkg/tcpip",
         "//pkg/tcpip/buffer",
         "//pkg/tcpip/checker",
